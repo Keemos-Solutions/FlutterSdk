@@ -1,0 +1,89 @@
+openapi: 3.0.3
+info:
+  title: Keemos IoT Smart Home API (User-only)
+  version: "1.1.0"
+servers:
+  - url: https://api.keemos.vn
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Login with email/password
+      requestBody:
+        required: true
+        content:
+          application/json:
+      responses:
+        '200':
+          description: OK
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh access token using refresh token
+      responses:
+        '200':
+          description: Token refreshed
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout and revoke refresh token
+      responses:
+        '200':
+          description: Logged out
+
+  /api/v1/auth/profile:
+    get:
+      tags: [auth]
+      summary: Get current user profile
+      responses:
+        '200':
+          description: User profile
+
+  /api/v1/households:
+    get:
+      tags: [households]
+      summary: List households for current user
+      responses:
+        '200':
+          description: Household list
+    post:
+      tags: [households]
+      summary: Create household
+      requestBody:
+        required: true
+        content:
+          application/json:
+      responses:
+        '201':
+          description: Household created
+
+  /api/v1/households/{household_id}/devices:
+    get:
+      tags: [households]
+      summary: List devices in household
+      parameters:
+        - in: path
+          name: household_id
+      responses:
+        '200':
+          description: Device list
+
+  /api/v1/devices/{device_id}/state:
+    get:
+      tags: [devices]
+      summary: Get current device state
+      parameters:
+        - in: path
+          name: device_id
+      responses:
+        '200':
+          description: Device state
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

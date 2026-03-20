@@ -23,18 +23,18 @@ class KeemosClient {
       if (error.response?.statusCode == 401) {
         final refreshed = await authManager.tryRefresh();
         if (refreshed) {
-          final token = await authManager.getAccessToken();
-          if (token != null) {
-            final opts = error.requestOptions;
-            opts.headers['Authorization'] = 'Bearer $token';
-            try {
-              final cloneReq = await dio.fetch(opts);
-              return handler.resolve(cloneReq);
-            } catch (e) {
-              return handler.next(error);
-            }
+        final token = await authManager.getAccessToken();
+        if (token != null) {
+          final opts = error.requestOptions;
+          opts.headers['Authorization'] = 'Bearer $token';
+          try {
+            final cloneReq = await this.dio.fetch(opts);
+            return handler.resolve(cloneReq);
+          } catch (e) {
+            return handler.next(error);
           }
         }
+      }
       }
       return handler.next(error);
     }));
