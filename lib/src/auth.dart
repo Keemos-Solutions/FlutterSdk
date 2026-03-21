@@ -67,6 +67,12 @@ class AuthManager {
 
   Future<String?> getAccessToken() => storage.readAccessToken();
 
+  // set access token w/o login (e.g. from saved state) - returns true if valid token set
+  Future<bool> setAccessToken(String token) async {
+    await storage.saveAccessToken(token);
+    return true;
+  }
+
   Future<bool> tryRefresh() async {
     final refresh = await storage.readRefreshToken();
     if (refresh == null) return false;
