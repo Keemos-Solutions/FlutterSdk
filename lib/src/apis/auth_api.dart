@@ -25,6 +25,7 @@ class AuthApi {
   Future<UserProfile> updateProfile(Map<String, dynamic> updates) async {
     final resp = await client.post('/api/v1/auth/profile', data: updates);
     final body = resp.data as Map<String, dynamic>;
+    await client.invalidateCacheByPrefix('/api/v1/auth/profile');
     return UserProfile.fromJson(body['data'] ?? body);
   }
 }

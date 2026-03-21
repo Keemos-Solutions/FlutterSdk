@@ -11,3 +11,4 @@ export 'src/apis/devices_api.dart';
 export 'src/apis/rooms_api.dart';
 export 'src/apis/automations_api.dart';
 export 'src/apis/notifications_api.dart';
+export 'src/cache.dart';

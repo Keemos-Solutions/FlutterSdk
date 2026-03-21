@@ -16,6 +16,8 @@ class HouseholdsApi {
   Future<Household> createHousehold(Map<String, dynamic> payload) async {
     final resp = await client.post('/api/v1/households', data: payload);
     final body = resp.data as Map<String, dynamic>;
+    // Invalidate cached household lists/details after a write.
+    await client.invalidateCacheByPrefix('/api/v1/households');
     return Household.fromJson(body['data'] as Map<String, dynamic>);
   }
 

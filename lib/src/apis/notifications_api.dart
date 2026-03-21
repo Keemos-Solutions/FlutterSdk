@@ -17,6 +17,7 @@ class NotificationsApi {
 
   Future<bool> markRead(String notificationId) async {
     final resp = await client.post('/api/v1/notifications/$notificationId/read');
+    await client.invalidateCacheByPrefix('/api/v1/notifications');
     return resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 300;
   }
 }

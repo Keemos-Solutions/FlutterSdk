@@ -32,6 +32,26 @@ Example usage (simple script):
 dart example/usage.dart
 ```
 
+Caching
+-------
+
+- Built-in GET caching with TTL and stale-while-revalidate.
+- Default: in-memory cache with sensible per-endpoint TTLs; override via `cacheOptions` on `client.get`.
+- For persistence, supply a tiered cache manager:
+
+```dart
+final cacheFile = File('${Directory.systemTemp.path}/keemos_cache.json');
+final client = KeemosClient(
+	authManager: AuthManager(),
+	cacheManager: CacheManager.tiered(
+		persistentStore: FileCacheStore(cacheFile.path),
+	),
+);
+```
+
+- Invalidate after writes when needed: `await client.invalidateCacheByPrefix('/api/v1/devices');`
+- Force refresh a single call: `client.get(path, cacheOptions: const CacheOptions(forceRefresh: true));`
+
 Generated modules and tests
 ---------------------------
 

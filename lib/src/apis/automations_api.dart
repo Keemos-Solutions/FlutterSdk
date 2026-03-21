@@ -14,6 +14,7 @@ class AutomationsApi {
 
   Future<bool> triggerAutomation(String automationId) async {
     final resp = await client.post('/api/v1/automations/$automationId/trigger');
+    await client.invalidateCacheByPrefix('/api/v1/automations');
     // assume success when 200/204
     return resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 300;
   }

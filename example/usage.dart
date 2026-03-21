@@ -1,10 +1,19 @@
+import 'dart:io';
+
 import 'package:keemos_sdk/keemos_sdk.dart';
 import 'package:dio/dio.dart';
 
 void main() async {
   final dio = Dio();
   final authManager = AuthManager(dio: dio);
-  final client = KeemosClient(dio: dio, authManager: authManager);
+  final cacheFile = File('${Directory.systemTemp.path}/keemos_cache.json');
+  final client = KeemosClient(
+    dio: dio,
+    authManager: authManager,
+    cacheManager: CacheManager.tiered(
+      persistentStore: FileCacheStore(cacheFile.path),
+    ),
+  );
 
   final authApi = AuthApi(client);
 
