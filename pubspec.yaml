@@ -5,7 +5,7 @@ environment:
   sdk: '>=2.18.0 <4.0.0'
 
 dependencies:
-  dio: ^4.0.6
+  dio: ^5.3.4
 
 dev_dependencies:
   test: ^1.21.0
