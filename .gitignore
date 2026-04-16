@@ -1,3 +1,8 @@
 openapi.yaml
 
 .dart_tool
+
+# FVM Version Cache
+.fvm/
+
+build

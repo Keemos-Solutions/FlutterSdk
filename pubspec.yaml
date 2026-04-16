@@ -1,11 +1,12 @@
 name: keemos_sdk
 description: Keemos IoT user-focused Dart SDK (core library)
-version: 0.2.0
+version: 0.3.0
 environment:
   sdk: '>=2.18.0 <4.0.0'
 
 dependencies:
   dio: ^5.3.4
+  web_socket_channel: ^3.0.1
 
 dev_dependencies:
   test: ^1.21.0

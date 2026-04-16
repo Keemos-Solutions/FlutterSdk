@@ -12,3 +12,5 @@ export 'src/apis/rooms_api.dart';
 export 'src/apis/automations_api.dart';
 export 'src/apis/notifications_api.dart';
 export 'src/cache.dart';
+export 'src/websocket/keemos_ws_url.dart';
+export 'src/websocket/keemos_device_websocket.dart';

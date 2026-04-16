@@ -29,4 +29,30 @@ class DevicesApi {
     final data = body['data'] as List<dynamic>? ?? [];
     return data.map((e) => Device.fromJson(e as Map<String, dynamic>)).toList();
   }
+
+  /// Send a command to a device.
+  /// 
+  /// [callType] - 'oneway' or 'twoway'
+  /// [deviceId] - ID of the device to control
+  /// [command] - Command payload as a JSON object
+  /// 
+  /// Returns the server response. For 'twoway' the API returns the device response directly.
+  Future<Map<String, dynamic>> sendCommand(
+    String callType,
+    String deviceId,
+    Map<String, dynamic> command,
+  ) async {
+    if (!['oneway', 'twoway'].contains(callType)) {
+      throw ArgumentError('callType must be either "oneway" or "twoway"');
+    }
+
+    final resp = await client.post(
+      '/api/v1/commands/$callType/$deviceId',
+      data: command,
+    );
+    final body = resp.data as Map<String, dynamic>;
+
+    // API returns final response directly for twoway; return as-is for both modes
+    return body;
+  }
 }
