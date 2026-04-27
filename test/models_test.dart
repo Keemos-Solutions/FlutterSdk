@@ -13,4 +13,26 @@ void main() {
     expect(t.tokenType, 'Bearer');
     expect(t.expiresIn, 900);
   });
+
+  test('ChangePasswordRequest serialization', () {
+    final req = ChangePasswordRequest(
+      oldPassword: 'OldPass123!@#',
+      newPassword: 'NewPass456!@#',
+    );
+
+    final out = req.toJson();
+    expect(out['old_password'], 'OldPass123!@#');
+    expect(out['new_password'], 'NewPass456!@#');
+  });
+
+  test('SocialProviderRequest serialization', () {
+    final req = SocialProviderRequest(
+      provider: 'facebook',
+      token: 'fb_token_value',
+    );
+
+    final out = req.toJson();
+    expect(out['provider'], 'facebook');
+    expect(out['token'], 'fb_token_value');
+  });
 }

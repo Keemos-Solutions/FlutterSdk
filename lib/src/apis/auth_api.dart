@@ -16,6 +16,30 @@ class AuthApi {
     await client.post('/api/v1/auth/logout');
   }
 
+  /// Link a social account (Google/Facebook/Apple) to current authenticated user.
+  Future<void> socialLink({
+    required String provider,
+    required String token,
+  }) async {
+    final req = SocialProviderRequest(provider: provider, token: token);
+    await client.post('/api/v1/auth/social-link', data: req.toJson());
+  }
+
+  /// Change password for current authenticated user.
+  ///
+  /// API may return HTTP 400 for social-login accounts that have never set
+  /// a manual password.
+  Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    final req = ChangePasswordRequest(
+      oldPassword: oldPassword,
+      newPassword: newPassword,
+    );
+    await client.post('/api/v1/auth/change-password', data: req.toJson());
+  }
+
   Future<UserProfile> getProfile() async {
     final resp = await client.get('/api/v1/auth/profile');
     final body = resp.data as Map<String, dynamic>;

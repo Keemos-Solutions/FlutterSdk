@@ -59,6 +59,18 @@ class InMemoryTokenStorage implements TokenStorage {
   }
 }
 
+class ChangePasswordNotAllowedException implements Exception {
+  final String message;
+
+  ChangePasswordNotAllowedException([
+    this.message = 'Change password is not available for this account. '
+        'Social-login accounts must set a manual password first.',
+  ]);
+
+  @override
+  String toString() => message;
+}
+
 class AuthManager {
   final Dio _dio;
   final TokenStorage storage;
@@ -98,8 +110,8 @@ class AuthManager {
 
   /// Social login (Google, Facebook, Apple)
   Future<AuthToken> socialLogin(String provider, String token) async {
-    final req = {'provider': provider, 'token': token};
-    final resp = await _dio.post('/api/v1/auth/social-login', data: req);
+    final req = SocialProviderRequest(provider: provider, token: token);
+    final resp = await _dio.post('/api/v1/auth/social-login', data: req.toJson());
     final body = resp.data as Map<String, dynamic>;
     final tokenData = body['data'] ?? body;
 
@@ -136,6 +148,98 @@ class AuthManager {
 
   /// Get refresh token
   Future<String?> getRefreshToken() => storage.readRefreshToken();
+
+  /// Link a social account (Google/Facebook/Apple) to current authenticated user.
+  ///
+  /// Requires a valid access token. If access token is expired, this method
+  /// will try one refresh and retry once.
+  Future<void> socialLink({
+    required String provider,
+    required String token,
+  }) async {
+    final access = await storage.readAccessToken();
+    if (access == null || access.isEmpty) {
+      throw StateError('No access token found. Login is required before socialLink.');
+    }
+
+    final payload = SocialProviderRequest(provider: provider, token: token).toJson();
+
+    Future<Response<dynamic>> send(String jwt) {
+      return _dio.post(
+        '/api/v1/auth/social-link',
+        data: payload,
+        options: Options(headers: {'Authorization': 'Bearer $jwt'}),
+      );
+    }
+
+    try {
+      await send(access);
+      return;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) {
+        final refreshed = await tryRefresh();
+        if (refreshed) {
+          final refreshedAccess = await storage.readAccessToken();
+          if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
+            await send(refreshedAccess);
+            return;
+          }
+        }
+      }
+      rethrow;
+    }
+  }
+
+  /// Change password for current authenticated user.
+  ///
+  /// Requires a valid access token. If the token is expired, this method will
+  /// try one refresh and retry once. Backend may return HTTP 400 for social
+  /// accounts that have never set a manual password.
+  Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    final access = await storage.readAccessToken();
+    if (access == null || access.isEmpty) {
+      throw StateError('No access token found. Login is required before changePassword.');
+    }
+
+    final payload = ChangePasswordRequest(
+      oldPassword: oldPassword,
+      newPassword: newPassword,
+    ).toJson();
+
+    Future<Response<dynamic>> send(String token) {
+      return _dio.post(
+        '/api/v1/auth/change-password',
+        data: payload,
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    }
+
+    try {
+      await send(access);
+      return;
+    } on DioException catch (e) {
+      final statusCode = e.response?.statusCode;
+      if (statusCode == 400 && _looksLikeSocialOnlyPasswordCase(e.response?.data)) {
+        throw ChangePasswordNotAllowedException();
+      }
+
+      if (statusCode == 401) {
+        final refreshed = await tryRefresh();
+        if (refreshed) {
+          final refreshedAccess = await storage.readAccessToken();
+          if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
+            await send(refreshedAccess);
+            return;
+          }
+        }
+      }
+
+      rethrow;
+    }
+  }
 
   /// Refresh access token using refresh token
   /// Prevents concurrent refresh requests using Completer
@@ -198,5 +302,20 @@ class AuthManager {
   /// Cleanup resources
   void dispose() {
     _tokenRefreshTimer?.cancel();
+  }
+
+  bool _looksLikeSocialOnlyPasswordCase(dynamic responseData) {
+    if (responseData is! Map<String, dynamic>) return false;
+    final directMessage = responseData['message']?.toString().toLowerCase() ?? '';
+    final dataMessage = (responseData['data'] is Map<String, dynamic>)
+        ? (responseData['data']['message']?.toString().toLowerCase() ?? '')
+        : '';
+    final msg = '$directMessage $dataMessage';
+    return msg.contains('social') ||
+        msg.contains('google') ||
+        msg.contains('facebook') ||
+        msg.contains('apple') ||
+        msg.contains('manual password') ||
+        msg.contains('set password');
   }
 }

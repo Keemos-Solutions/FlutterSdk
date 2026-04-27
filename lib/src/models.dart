@@ -10,6 +10,30 @@ class LoginRequest {
       };
 }
 
+    class SocialProviderRequest {
+      final String provider;
+      final String token;
+
+      SocialProviderRequest({required this.provider, required this.token});
+
+      Map<String, dynamic> toJson() => {
+        'provider': provider,
+        'token': token,
+      };
+    }
+
+class ChangePasswordRequest {
+  final String oldPassword;
+  final String newPassword;
+
+  ChangePasswordRequest({required this.oldPassword, required this.newPassword});
+
+  Map<String, dynamic> toJson() => {
+        'old_password': oldPassword,
+        'new_password': newPassword,
+      };
+}
+
 class TokenResponse {
   final String accessToken;
   final String? tokenType;
