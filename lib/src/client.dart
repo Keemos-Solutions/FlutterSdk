@@ -41,22 +41,22 @@ class KeemosClient {
       }
       return handler.next(options);
     }, onError: (error, handler) async {
-      // Basic 401 refresh flow placeholder
-      if (error.response?.statusCode == 401) {
+      // Handle 401 Unauthorized - try to refresh token
+      if (error.response?.statusCode == 401 && error.requestOptions.path != '/api/v1/auth/refresh') {
         final refreshed = await authManager.tryRefresh();
         if (refreshed) {
-        final token = await authManager.getAccessToken();
-        if (token != null) {
-          final opts = error.requestOptions;
-          opts.headers['Authorization'] = 'Bearer $token';
-          try {
-            final cloneReq = await this.dio.fetch(opts);
-            return handler.resolve(cloneReq);
-          } catch (e) {
-            return handler.next(error);
+          final token = await authManager.getAccessToken();
+          if (token != null && token.isNotEmpty) {
+            final opts = error.requestOptions;
+            opts.headers['Authorization'] = 'Bearer $token';
+            try {
+              final cloneReq = await this.dio.fetch(opts);
+              return handler.resolve(cloneReq);
+            } catch (e) {
+              return handler.next(error);
+            }
           }
         }
-      }
       }
       return handler.next(error);
     }));
