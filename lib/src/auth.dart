@@ -288,6 +288,8 @@ class AuthManager {
         options: Options(
           headers: {
             'Cookie': 'ory_kratos_session=$sessionToken',
+            'Authorization': 'Bearer $sessionToken',
+            'X-Session-Token': sessionToken,
             'Accept': 'application/json',
           },
         ),
