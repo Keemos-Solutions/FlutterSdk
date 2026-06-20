@@ -563,6 +563,75 @@ class AuthManager {
     }
   }
 
+  /// Generates the Kratos social linking URL.
+  ///
+  /// The app should open this URL in an In-App Browser to complete OAuth linking.
+  /// Once done, Kratos will redirect back to the app using a Deep Link.
+  Future<String> getSocialLinkingUrl(String provider) async {
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+    final kratosToken = await _getKratosSessionToken();
+    if (kratosToken == null || kratosToken.isEmpty) {
+      throw StateError('Kratos session token not found. Login is required.');
+    }
+
+    // Bước 1: Khởi tạo settings flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/settings/api',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Tạo link URL
+    return '$baseDomain/kratos/self-service/settings/browser?flow=$flowId&link=$provider';
+  }
+
+  /// Unlinks a social provider (e.g., 'google') from the current Kratos account.
+  Future<void> unlinkSocialProvider(String provider) async {
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+    final kratosToken = await _getKratosSessionToken();
+    if (kratosToken == null || kratosToken.isEmpty) {
+      throw StateError('Kratos session token not found. Login is required.');
+    }
+
+    // Bước 1: Khởi tạo settings flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/settings/api',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Gửi yêu cầu gỡ liên kết
+    await _dio.post(
+      '$baseDomain/kratos/self-service/settings',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'oidc',
+        'unlink': provider,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+  }
+
   /// Change password for current authenticated user.
   ///
   /// Requires a valid Kratos session token or access token.
