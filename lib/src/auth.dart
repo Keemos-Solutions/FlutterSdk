@@ -275,6 +275,12 @@ class AuthManager {
     final registrationBody = registrationResp.data as Map<String, dynamic>;
     final sessionToken = registrationBody['session_token'] as String;
 
+    final session = registrationBody['session'] as Map<String, dynamic>?;
+    final identity = session?['identity'] as Map<String, dynamic>?;
+    final traits = identity?['traits'] as Map<String, dynamic>?;
+    final kratosFullName = traits?['full_name'] as String?;
+    final kratosAvatarUrl = traits?['avatar_url'] as String?;
+
     // Lưu Kratos Session Token
     await _saveKratosSessionToken(sessionToken);
 
@@ -293,6 +299,34 @@ class AuthManager {
     final sessionBody = sessionResp.data as Map<String, dynamic>;
     final authToken = _parseAuthToken(sessionBody);
     await _persistAuthToken(authToken);
+
+    // Chủ động đồng bộ lên core-api của Keemos
+    if (kratosFullName != null || kratosAvatarUrl != null) {
+      try {
+        final updates = <String, dynamic>{};
+        if (kratosFullName != null && kratosFullName.isNotEmpty) {
+          updates['full_name'] = kratosFullName;
+          updates['name'] = kratosFullName;
+        }
+        if (kratosAvatarUrl != null && kratosAvatarUrl.isNotEmpty) {
+          updates['avatar_url'] = kratosAvatarUrl;
+          updates['avatarUrl'] = kratosAvatarUrl;
+        }
+        if (updates.isNotEmpty) {
+          await _dio.post(
+            '/api/v1/auth/profile',
+            data: updates,
+            options: Options(
+              headers: {
+                'Authorization': 'Bearer ${authToken.accessToken}',
+              },
+            ),
+          );
+        }
+      } catch (e) {
+        dev.log('[SDK Auth] Failed to sync profile traits to Keemos backend: $e');
+      }
+    }
 
     return authToken;
   }
@@ -441,6 +475,12 @@ class AuthManager {
       final sessionToken = submitBody['session_token'] as String;
       await _saveKratosSessionToken(sessionToken);
 
+      final session = submitBody['session'] as Map<String, dynamic>?;
+      final identity = session?['identity'] as Map<String, dynamic>?;
+      final traits = identity?['traits'] as Map<String, dynamic>?;
+      final kratosFullName = traits?['full_name'] as String?;
+      final kratosAvatarUrl = traits?['avatar_url'] as String?;
+
       // Bước 3: Đổi Kratos Session lấy Keemos JWT
       dev.log('[SDK Auth] Step 3: Exchange Kratos Session for Keemos JWT');
       final sessionResp = await _dio.get(
@@ -458,6 +498,37 @@ class AuthManager {
       final authToken = _parseAuthToken(sessionBody);
 
       await _persistAuthToken(authToken);
+
+      // Chủ động đồng bộ full_name và avatar_url lên core-api của Keemos
+      if (kratosFullName != null || kratosAvatarUrl != null) {
+        try {
+          dev.log('[SDK Auth] Syncing profile traits from Kratos to Keemos backend...');
+          final updates = <String, dynamic>{};
+          if (kratosFullName != null && kratosFullName.isNotEmpty) {
+            updates['full_name'] = kratosFullName;
+            updates['name'] = kratosFullName;
+          }
+          if (kratosAvatarUrl != null && kratosAvatarUrl.isNotEmpty) {
+            updates['avatar_url'] = kratosAvatarUrl;
+            updates['avatarUrl'] = kratosAvatarUrl;
+          }
+          if (updates.isNotEmpty) {
+            await _dio.post(
+              '/api/v1/auth/profile',
+              data: updates,
+              options: Options(
+                headers: {
+                  'Authorization': 'Bearer ${authToken.accessToken}',
+                },
+              ),
+            );
+            dev.log('[SDK Auth] Profile traits synced successfully');
+          }
+        } catch (e) {
+          dev.log('[SDK Auth] Failed to sync profile traits to Keemos backend: $e');
+        }
+      }
+
       return authToken;
     } else {
       final req = SocialProviderRequest(provider: provider, token: token);
@@ -752,6 +823,30 @@ class AuthManager {
         },
       ),
     );
+
+    // Chủ động đồng bộ lên Keemos core-api làm fallback bảo đảm chắc chắn
+    final access = await _getAccessToken();
+    if (access != null && access.isNotEmpty) {
+      try {
+        final updates = <String, dynamic>{
+          'full_name': fullName,
+          'name': fullName,
+        };
+        if (avatarUrl != null) {
+          updates['avatar_url'] = avatarUrl;
+          updates['avatarUrl'] = avatarUrl;
+        }
+        await _dio.post(
+          '/api/v1/auth/profile',
+          data: updates,
+          options: Options(
+            headers: {'Authorization': 'Bearer $access'},
+          ),
+        );
+      } catch (e) {
+        dev.log('[SDK Auth] Sync profile to Keemos error: $e');
+      }
+    }
   }
 
   /// Verify email address using the OTP code received from Kratos.
