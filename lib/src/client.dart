@@ -66,6 +66,10 @@ class KeemosClient {
     rooms = RoomsApi(this);
     automations = AutomationsApi(this);
     notifications = NotificationsApi(this);
+
+    this.authManager.onLogout = () async {
+      await this.cacheManager?.clear();
+    };
   }
 
   Future<Response> post(String path, {dynamic data, Map<String, dynamic>? queryParameters}) {

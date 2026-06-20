@@ -142,6 +142,8 @@ class AuthManager {
     return DateTime.now().millisecondsSinceEpoch > (expiry - 60000);
   }
 
+  FutureOr<void> Function()? onLogout;
+
   AuthManager({Dio? dio, TokenStorage? storage})
       : _dio = dio ?? Dio(),
         storage = storage ?? InMemoryTokenStorage() {
@@ -569,6 +571,14 @@ class AuthManager {
         dev.log('[SDK Auth] Kratos logout error: $e');
       }
       await _clearKratosSessionToken();
+    }
+
+    if (onLogout != null) {
+      try {
+        await onLogout!();
+      } catch (e) {
+        dev.log('[SDK Auth] onLogout callback error: $e');
+      }
     }
 
     try {
