@@ -89,6 +89,29 @@ paths:
         '201':
           description: Household created
 
+  /api/v1/households/{household_id}:
+    put:
+      tags: [households]
+      summary: Update household info (Owner/Admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: household_id
+      requestBody:
+        required: true
+        content:
+          application/json:
+      responses:
+        '200':
+          description: Household updated
+        '400':
+          description: Invalid request payload (e.g. empty name)
+        '403':
+          description: Forbidden (requires Owner/Admin role)
+        '404':
+          description: Household not found
+
   /api/v1/households/{household_id}/devices:
     get:
       tags: [households]
@@ -99,6 +122,75 @@ paths:
       responses:
         '200':
           description: Device list
+
+  /api/v1/households/{household_id}/members:
+    get:
+      tags: [households]
+      summary: List members in household
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: household_id
+      responses:
+        '200':
+          description: Member list
+    post:
+      tags: [households]
+      summary: Invite member by email
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: household_id
+      requestBody:
+        required: true
+        content:
+          application/json:
+      responses:
+        '200':
+          description: Member invited
+
+  /api/v1/households/{household_id}/members/{user_id}:
+    delete:
+      tags: [households]
+      summary: Remove member from household
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: household_id
+        - in: path
+          name: user_id
+      responses:
+        '200':
+          description: Member removed
+
+  /api/v1/households/{household_id}/invitations/codes:
+    post:
+      tags: [households]
+      summary: Create short-lived invitation code
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: household_id
+      responses:
+        '200':
+          description: Invitation code created
+
+  /api/v1/households/join/{code}:
+    get:
+      tags: [households]
+      summary: Join household using invitation code
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: code
+      responses:
+        '200':
+          description: Joined household
 
   /api/v1/devices/{device_id}/state:
     get:

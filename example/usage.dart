@@ -16,6 +16,7 @@ void main() async {
   );
 
   final authApi = AuthApi(client);
+  final householdsApi = HouseholdsApi(client);
 
   // Example login
   final token = await authApi.login('user@example.com', 'SecurePass123!@#');
@@ -37,5 +38,14 @@ void main() async {
   await authApi.socialLink(
     provider: 'facebook',
     token: 'FB_TOKEN_HERE',
+  );
+
+  // Update household name/address (for edit pencil flow in UI).
+  await householdsApi.updateHousehold(
+    'HOUSEHOLD_ID_HERE',
+    name: 'My Home',
+    address: '123 Main Street',
+    city: 'Ha Noi',
+    type: 'villa',
   );
 }

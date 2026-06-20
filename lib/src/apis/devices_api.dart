@@ -55,4 +55,34 @@ class DevicesApi {
     // API returns final response directly for twoway; return as-is for both modes
     return body;
   }
+
+  /// Update device metadata/config.
+  ///
+  /// Supports updating any subset of fields via [name], [roomId], and [config].
+  /// Returns the updated [Device].
+  Future<Device> updateDevice(
+    String deviceId, {
+    String? name,
+    String? roomId,
+    Map<String, dynamic>? config,
+  }) async {
+    final payload = <String, dynamic>{
+      if (name != null) 'name': name,
+      if (roomId != null) 'room_id': roomId,
+      if (config != null) 'config': config,
+    };
+
+    if (payload.isEmpty) {
+      throw ArgumentError('At least one field must be provided for updateDevice.');
+    }
+
+    final resp = await client.dio.patch('/api/v1/devices/$deviceId', data: payload);
+    final body = resp.data as Map<String, dynamic>;
+    final data = body['data'] as Map<String, dynamic>? ?? body;
+
+    await client.invalidateCacheByPrefix('/api/v1/devices');
+    await client.invalidateCacheByPrefix('/api/v1/households');
+
+    return Device.fromJson(data);
+  }
 }

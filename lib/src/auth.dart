@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as dev;
 import 'package:dio/dio.dart';
 import 'models.dart';
 import 'generated/auth_models.dart';
@@ -55,7 +56,8 @@ class InMemoryTokenStorage implements TokenStorage {
 
   @override
   Future<void> saveTokenExpiry(int expiresIn) async {
-    _expiryMs = DateTime.now().add(Duration(seconds: expiresIn)).millisecondsSinceEpoch;
+    _expiryMs =
+        DateTime.now().add(Duration(seconds: expiresIn)).millisecondsSinceEpoch;
   }
 }
 
@@ -74,80 +76,263 @@ class ChangePasswordNotAllowedException implements Exception {
 class AuthManager {
   final Dio _dio;
   final TokenStorage storage;
-  late StreamSubscription? _tokenRefreshTimer;
+  Timer? _autoRefreshTimer;
 
   /// Completer to prevent concurrent refresh requests
   Completer<bool>? _refreshInProgress;
+
+  // Cache fields to prevent write-to-read delay and performance issues
+  String? _accessTokenCache;
+  String? _refreshTokenCache;
+  int? _tokenExpiryCache;
+  bool _isAuthFailed = false;
+
+  Future<String?> _getAccessToken() async {
+    if (_accessTokenCache != null) return _accessTokenCache;
+    _accessTokenCache = await storage.readAccessToken();
+    return _accessTokenCache;
+  }
+
+  Future<String?> _getRefreshToken() async {
+    if (_refreshTokenCache != null) return _refreshTokenCache;
+    _refreshTokenCache = await storage.readRefreshToken();
+    return _refreshTokenCache;
+  }
+
+  Future<int?> _getTokenExpiry() async {
+    if (_tokenExpiryCache != null) return _tokenExpiryCache;
+    _tokenExpiryCache = await storage.readTokenExpiry();
+    return _tokenExpiryCache;
+  }
+
+  Future<bool> _isTokenExpired() async {
+    final expiry = await _getTokenExpiry();
+    if (expiry == null) return true;
+    return DateTime.now().millisecondsSinceEpoch > (expiry - 60000);
+  }
 
   AuthManager({Dio? dio, TokenStorage? storage})
       : _dio = dio ?? Dio(),
         storage = storage ?? InMemoryTokenStorage() {
     _dio.options.baseUrl = 'https://api.keemos.vn';
+    _setupInterceptors();
+    unawaited(_restoreAutoRefresh());
+  }
+
+  /// Setup Dio interceptors for automatic token refresh on 401
+  void _setupInterceptors() {
+    // Request interceptor: Add Authorization header with access token
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (RequestOptions options, handler) async {
+          final accessToken = await _getAccessToken();
+          if (accessToken != null && accessToken.isNotEmpty) {
+            options.headers['Authorization'] = 'Bearer $accessToken';
+          }
+          return handler.next(options);
+        },
+      ),
+    );
+
+    // Error interceptor: Handle 401 by refreshing token and retrying
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onError: (DioException error, handler) async {
+          // Handle 401 Unauthorized errors by attempting token refresh
+          // Skip retry for refresh endpoint itself to prevent infinite loop
+          final isRefreshEndpoint =
+              error.requestOptions.path.contains('/auth/refresh');
+          final alreadyRetried =
+              error.requestOptions.extra['_refreshed_token'] == true;
+
+          // Nếu đã xác định xác thực thất bại hoặc chưa đăng nhập, bỏ qua việc gọi tryRefresh
+          if (_isAuthFailed) {
+            return handler.next(error);
+          }
+
+          if (error.response?.statusCode == 401 &&
+              !isRefreshEndpoint &&
+              !alreadyRetried) {
+            try {
+              final refreshed = await tryRefresh();
+              if (refreshed) {
+                // Mark request as refreshed to prevent infinite retries
+                error.requestOptions.extra['_refreshed_token'] = true;
+
+                // Retry the original request with refreshed token
+                return handler.resolve(
+                  await _dio.request(
+                    error.requestOptions.path,
+                    data: error.requestOptions.data,
+                    queryParameters: error.requestOptions.queryParameters,
+                    options: Options(
+                      method: error.requestOptions.method,
+                      headers: error.requestOptions.headers,
+                      extra: error.requestOptions.extra,
+                    ),
+                  ),
+                );
+              }
+            } catch (_) {
+              // Refresh failed, pass through the original error
+              return handler.next(error);
+            }
+          }
+          return handler.next(error);
+        },
+      ),
+    );
   }
 
   /// Login with email and password
   /// Saves both access and refresh tokens with expiration time
-  Future<AuthToken> login(String email, String password) async {
-    final req = LoginRequest(email: email, password: password);
+  Future<AuthToken> login(
+    String email,
+    String password, {
+    String? deviceName,
+  }) async {
+    final req = LoginRequest(
+      email: email,
+      password: password,
+      deviceName: deviceName,
+    );
     final resp = await _dio.post('/api/v1/auth/login', data: req.toJson());
     final body = resp.data as Map<String, dynamic>;
-    final tokenData = body['data'] ?? body;
-
-    // Parse both tokens from response
-    final authToken = AuthToken.fromJson(tokenData['tokens'] ?? tokenData);
-
-    // Save tokens
-    await storage.saveAccessToken(authToken.accessToken);
-    if (authToken.refreshToken != null) {
-      await storage.saveRefreshToken(authToken.refreshToken!);
-    }
-    if (authToken.expiresIn != null) {
-      await storage.saveTokenExpiry(authToken.expiresIn!);
-    }
-
+    final authToken = _parseAuthToken(body);
+    await _persistAuthToken(authToken);
     return authToken;
+  }
+
+  /// Register with email and password. Saves tokens when returned by the API.
+  Future<AuthToken> register({
+    required String email,
+    required String password,
+    String? fullName,
+  }) async {
+    final req = RegisterRequest(
+      email: email,
+      password: password,
+      fullName: fullName,
+    );
+    final resp = await _dio.post('/api/v1/auth/register', data: req.toJson());
+    final body = resp.data as Map<String, dynamic>;
+    final authToken = _parseAuthToken(body);
+    await _persistAuthToken(authToken);
+    return authToken;
+  }
+
+  /// Request a password-reset OTP for [email].
+  Future<void> forgotPassword(String email) async {
+    final req = ForgotPasswordRequest(email: email);
+    await _dio.post('/api/v1/auth/forgot-password', data: req.toJson());
+  }
+
+  /// Reset password using OTP from email.
+  Future<void> resetPassword({
+    required String email,
+    required String otp,
+    required String newPassword,
+  }) async {
+    final req = ResetPasswordRequest(
+      email: email,
+      otp: otp,
+      newPassword: newPassword,
+    );
+    await _dio.post('/api/v1/auth/reset-password', data: req.toJson());
   }
 
   /// Social login (Google, Facebook, Apple)
   Future<AuthToken> socialLogin(String provider, String token) async {
-    final req = SocialProviderRequest(provider: provider, token: token);
-    final resp = await _dio.post('/api/v1/auth/social-login', data: req.toJson());
-    final body = resp.data as Map<String, dynamic>;
-    final tokenData = body['data'] ?? body;
+    if (provider == 'google') {
+      dev.log('[SDK Auth] Starting Kratos Google SSO flow');
+      final baseUri = Uri.parse(_dio.options.baseUrl);
+      final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
 
-    final authToken = AuthToken.fromJson(tokenData['tokens'] ?? tokenData);
+      // Bước 1: Khởi tạo Login Flow trên Kratos
+      dev.log('[SDK Auth] Step 1: Initialize Kratos login flow');
+      final flowResp = await _dio.get(
+        '$baseDomain/kratos/self-service/login/api',
+        options: Options(
+          headers: {
+            'Accept': 'application/json',
+          },
+        ),
+      );
+      final flowBody = flowResp.data as Map<String, dynamic>;
+      final flowId = flowBody['id'] as String;
 
-    await storage.saveAccessToken(authToken.accessToken);
-    if (authToken.refreshToken != null) {
-      await storage.saveRefreshToken(authToken.refreshToken!);
+      // Bước 2: Submit Google IDToken lên Kratos
+      dev.log('[SDK Auth] Step 2: Submit Google IDToken to Kratos. Flow: $flowId');
+      final submitResp = await _dio.post(
+        '$baseDomain/kratos/self-service/login',
+        queryParameters: {'flow': flowId},
+        data: {
+          'method': 'oidc',
+          'provider': 'google',
+          'id_token': token,
+        },
+        options: Options(
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+        ),
+      );
+      final submitBody = submitResp.data as Map<String, dynamic>;
+      final sessionToken = submitBody['session_token'] as String;
+
+      // Bước 3: Đổi Kratos Session lấy Keemos JWT
+      dev.log('[SDK Auth] Step 3: Exchange Kratos Session for Keemos JWT');
+      final sessionResp = await _dio.get(
+        '$baseDomain/api/v1/auth/session/kratos',
+        options: Options(
+          headers: {
+            'Cookie': 'ory_kratos_session=$sessionToken',
+            'Accept': 'application/json',
+          },
+        ),
+      );
+      final sessionBody = sessionResp.data as Map<String, dynamic>;
+      final authToken = _parseAuthToken(sessionBody);
+
+      await _persistAuthToken(authToken);
+      return authToken;
+    } else {
+      final req = SocialProviderRequest(provider: provider, token: token);
+      final resp =
+          await _dio.post('/api/v1/auth/social-login', data: req.toJson());
+      final body = resp.data as Map<String, dynamic>;
+      final authToken = _parseAuthToken(body);
+
+      await _persistAuthToken(authToken);
+
+      return authToken;
     }
-    if (authToken.expiresIn != null) {
-      await storage.saveTokenExpiry(authToken.expiresIn!);
-    }
-
-    return authToken;
   }
 
   /// Logout and clear all stored tokens
   Future<void> logout() async {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = null;
     try {
       await _dio.post('/api/v1/auth/logout');
     } catch (_) {}
-    await storage.clear();
+    await _clearTokensSafely();
   }
 
   /// Get current access token
-  Future<String?> getAccessToken() => storage.readAccessToken();
+  Future<String?> getAccessToken() => _getAccessToken();
 
   /// Set access token without login (e.g., from saved state)
   /// Returns true if token is set successfully
   Future<bool> setAccessToken(String token) async {
+    _accessTokenCache = token;
     await storage.saveAccessToken(token);
     return true;
   }
 
   /// Get refresh token
-  Future<String?> getRefreshToken() => storage.readRefreshToken();
+  Future<String?> getRefreshToken() => _getRefreshToken();
 
   /// Link a social account (Google/Facebook/Apple) to current authenticated user.
   ///
@@ -157,12 +342,14 @@ class AuthManager {
     required String provider,
     required String token,
   }) async {
-    final access = await storage.readAccessToken();
+    final access = await _getAccessToken();
     if (access == null || access.isEmpty) {
-      throw StateError('No access token found. Login is required before socialLink.');
+      throw StateError(
+          'No access token found. Login is required before socialLink.');
     }
 
-    final payload = SocialProviderRequest(provider: provider, token: token).toJson();
+    final payload =
+        SocialProviderRequest(provider: provider, token: token).toJson();
 
     Future<Response<dynamic>> send(String jwt) {
       return _dio.post(
@@ -179,7 +366,7 @@ class AuthManager {
       if (e.response?.statusCode == 401) {
         final refreshed = await tryRefresh();
         if (refreshed) {
-          final refreshedAccess = await storage.readAccessToken();
+          final refreshedAccess = await _getAccessToken();
           if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
             await send(refreshedAccess);
             return;
@@ -199,9 +386,10 @@ class AuthManager {
     required String oldPassword,
     required String newPassword,
   }) async {
-    final access = await storage.readAccessToken();
+    final access = await _getAccessToken();
     if (access == null || access.isEmpty) {
-      throw StateError('No access token found. Login is required before changePassword.');
+      throw StateError(
+          'No access token found. Login is required before changePassword.');
     }
 
     final payload = ChangePasswordRequest(
@@ -222,14 +410,15 @@ class AuthManager {
       return;
     } on DioException catch (e) {
       final statusCode = e.response?.statusCode;
-      if (statusCode == 400 && _looksLikeSocialOnlyPasswordCase(e.response?.data)) {
+      if (statusCode == 400 &&
+          _looksLikeSocialOnlyPasswordCase(e.response?.data)) {
         throw ChangePasswordNotAllowedException();
       }
 
       if (statusCode == 401) {
         final refreshed = await tryRefresh();
         if (refreshed) {
-          final refreshedAccess = await storage.readAccessToken();
+          final refreshedAccess = await _getAccessToken();
           if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
             await send(refreshedAccess);
             return;
@@ -241,72 +430,286 @@ class AuthManager {
     }
   }
 
+  /// Fetch current authenticated user's profile.
+  /// Will attempt one token refresh on 401 and retry.
+  Future<UserProfile> getUserProfile() async {
+    final access = await _getAccessToken();
+    if (access == null || access.isEmpty) {
+      throw StateError(
+          'No access token found. Login is required before getUserProfile.');
+    }
+
+    Future<Response<dynamic>> send(String token) {
+      return _dio.get(
+        '/api/v1/auth/profile',
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    }
+
+    try {
+      final resp = await send(access);
+      final body = resp.data as Map<String, dynamic>;
+      final data = body['data'] ?? body;
+      return UserProfile.fromJson(data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) {
+        final refreshed = await tryRefresh();
+        if (refreshed) {
+          final refreshedAccess = await _getAccessToken();
+          if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
+            final resp = await send(refreshedAccess);
+            final body = resp.data as Map<String, dynamic>;
+            final data = body['data'] ?? body;
+            return UserProfile.fromJson(data as Map<String, dynamic>);
+          }
+        }
+      }
+      rethrow;
+    }
+  }
+
+  /// Update arbitrary app-level settings for the current authenticated user.
+  /// `settings` may be any JSON-serializable map.
+  /// Will attempt one token refresh on 401 and retry.
+  Future<Map<String, dynamic>> updateAppSettings(
+      Map<String, dynamic> settings) async {
+    final access = await _getAccessToken();
+    if (access == null || access.isEmpty) {
+      throw StateError(
+          'No access token found. Login is required before updateAppSettings.');
+    }
+
+    Future<Response<dynamic>> send(String token) {
+      return _dio.patch(
+        '/api/v1/auth/app-settings',
+        data: {'settings': settings},
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+    }
+
+    try {
+      final resp = await send(access);
+      final body = resp.data as Map<String, dynamic>;
+      return (body['data'] ?? body) as Map<String, dynamic>;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) {
+        final refreshed = await tryRefresh();
+        if (refreshed) {
+          final refreshedAccess = await _getAccessToken();
+          if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
+            final resp = await send(refreshedAccess);
+            final body = resp.data as Map<String, dynamic>;
+            return (body['data'] ?? body) as Map<String, dynamic>;
+          }
+        }
+      }
+      rethrow;
+    }
+  }
+
   /// Refresh access token using refresh token
   /// Prevents concurrent refresh requests using Completer
   Future<bool> tryRefresh() async {
     // If refresh is already in progress, wait for it to complete
-    if (_refreshInProgress != null) {
-      return _refreshInProgress!.future;
+    final inProgress = _refreshInProgress;
+    if (inProgress != null) {
+      dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh() already in progress, waiting...');
+      return inProgress.future;
     }
 
-    final refresh = await storage.readRefreshToken();
-    if (refresh == null) return false;
-
-    _refreshInProgress = Completer<bool>();
+    final completer = Completer<bool>();
+    _refreshInProgress = completer;
 
     try {
+      // Kiểm tra xem có thực thể khác đã làm mới token thành công trước đó chưa
+      final latestAccess = await storage.readAccessToken();
+      if (latestAccess != null && latestAccess.isNotEmpty && latestAccess != _accessTokenCache) {
+        final expired = await storage.isAccessTokenExpired();
+        if (!expired) {
+          dev.log('[SDK Auth #${identityHashCode(this)}] Another instance already refreshed token. Syncing cache...');
+          _accessTokenCache = latestAccess;
+          _refreshTokenCache = await storage.readRefreshToken();
+          _tokenExpiryCache = await storage.readTokenExpiry();
+          _scheduleAutoRefresh(_tokenExpiryCache);
+          return _completeRefresh(completer, true);
+        }
+      }
+
+      // Kiểm tra xem token hiện tại đã thực sự hết hạn chưa.
+      // Nếu token vẫn còn hạn, lỗi 401 của API không phải do hết hạn token.
+      // Bỏ qua refresh để tránh tạo vòng lặp spam server vô ích.
+      final isExpired = await _isTokenExpired();
+      if (!isExpired) {
+        dev.log('[SDK Auth #${identityHashCode(this)}] Token is still valid. Skipping refresh to prevent spam.');
+        return _completeRefresh(completer, false);
+      }
+
+      // Luôn đọc trực tiếp từ storage để tránh cache RAM bị lệch pha với storage chung
+      _refreshTokenCache = await storage.readRefreshToken();
+      final refresh = _refreshTokenCache;
+      dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh() called. Stored refresh token length: ${refresh?.length ?? 0}');
+      if (refresh == null || refresh.isEmpty) {
+        dev.log('[SDK Auth #${identityHashCode(this)}] No refresh token available, skipping refresh.');
+        return _completeRefresh(completer, false);
+      }
+
+      dev.log('[SDK Auth #${identityHashCode(this)}] Sending POST /api/v1/auth/refresh...');
       final resp = await _dio.post(
         '/api/v1/auth/refresh',
         data: {'refresh_token': refresh},
         options: Options(
           validateStatus: (status) {
-            // Don't throw on 401, we'll handle it
+            // Nhận tất cả mã lỗi HTTP dưới 500 để tự xử lý lỗi Client (4xx)
             return status != null && status < 500;
           },
         ),
       );
 
       final statusCode = resp.statusCode ?? 200;
-      if (statusCode == 401) {
-        await storage.clear();
-        _refreshInProgress!.complete(false);
-        return false;
+      dev.log('[SDK Auth #${identityHashCode(this)}] POST /api/v1/auth/refresh response status: $statusCode');
+      // Nếu là lỗi xác thực phía Client (400 Bad Request, 401 Unauthorized, 403 Forbidden...)
+      // thì chứng tỏ refresh token đã hết hạn hoặc không hợp lệ, cần xóa sạch token.
+      if (statusCode >= 400 && statusCode < 500) {
+        dev.log('[SDK Auth #${identityHashCode(this)}] Auth failure (4xx). Clearing tokens to stop loop.');
+        await _clearTokensSafely();
+        return _completeRefresh(completer, false);
       }
 
       final body = resp.data as Map<String, dynamic>;
-      final tokenData = body['data'] ?? body;
-      final authToken = AuthToken.fromJson(tokenData['tokens'] ?? tokenData);
+      final authToken = _parseAuthToken(body);
 
-      await storage.saveAccessToken(authToken.accessToken);
-      if (authToken.refreshToken != null) {
-        await storage.saveRefreshToken(authToken.refreshToken!);
-      }
-      if (authToken.expiresIn != null) {
-        await storage.saveTokenExpiry(authToken.expiresIn!);
-      }
+      dev.log('[SDK Auth #${identityHashCode(this)}] Parsed AuthToken successfully. Saving new tokens...');
+      await _persistAuthToken(authToken);
 
-      _refreshInProgress!.complete(true);
-      return true;
+      return _completeRefresh(completer, true);
     } catch (e) {
-      await storage.clear();
-      _refreshInProgress!.complete(false);
-      return false;
+      dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh() encountered exception: $e');
+      // Đối với lỗi mạng hoặc lỗi server (5xx), không nên tự động xóa token
+      // để tránh việc người dùng bị đăng xuất vô lý khi mất kết nối mạng tạm thời.
+      if (e is DioException) {
+        final statusCode = e.response?.statusCode;
+        dev.log('[SDK Auth #${identityHashCode(this)}] DioException status code: $statusCode');
+        if (statusCode != null && statusCode >= 400 && statusCode < 500) {
+          dev.log('[SDK Auth #${identityHashCode(this)}] DioException with 4xx. Clearing tokens...');
+          await _clearTokensSafely();
+        }
+      }
+      return _completeRefresh(completer, false);
     } finally {
-      _refreshInProgress = null;
+      if (identical(_refreshInProgress, completer)) {
+        _refreshInProgress = null;
+      }
     }
   }
 
   /// Check if access token is expired
-  Future<bool> isTokenExpired() => storage.isAccessTokenExpired();
+  Future<bool> isTokenExpired() => _isTokenExpired();
 
   /// Cleanup resources
   void dispose() {
-    _tokenRefreshTimer?.cancel();
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = null;
+  }
+
+  Future<void> _restoreAutoRefresh() async {
+    final expiryMs = await _getTokenExpiry();
+    final refresh = await _getRefreshToken();
+    if (refresh == null || refresh.isEmpty) {
+      _isAuthFailed = true;
+    } else {
+      _isAuthFailed = false;
+    }
+    dev.log('[SDK Auth #${identityHashCode(this)}] _restoreAutoRefresh() called. Read expiryMs: $expiryMs, _isAuthFailed: $_isAuthFailed');
+    _scheduleAutoRefresh(expiryMs);
+  }
+
+  void _scheduleAutoRefresh(int? expiryMs) {
+    _autoRefreshTimer?.cancel();
+
+    if (expiryMs == null) {
+      dev.log('[SDK Auth #${identityHashCode(this)}] _scheduleAutoRefresh: expiryMs is null. Skipping timer scheduling.');
+      return;
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final refreshAt = expiryMs - const Duration(minutes: 1).inMilliseconds;
+    final delayMs = refreshAt - now;
+    final safeDelayMs = delayMs > 0 ? delayMs : 1000;
+
+    dev.log('[SDK Auth #${identityHashCode(this)}] _scheduleAutoRefresh: expiryMs=$expiryMs, now=$now, delayMs=$delayMs, safeDelayMs=$safeDelayMs ms');
+
+    _autoRefreshTimer = Timer(Duration(milliseconds: safeDelayMs), () {
+      dev.log('[SDK Auth #${identityHashCode(this)}] Auto-refresh timer fired! Executing tryRefresh()...');
+      unawaited(tryRefresh());
+    });
+  }
+
+  bool _completeRefresh(Completer<bool> completer, bool value) {
+    if (!completer.isCompleted) {
+      completer.complete(value);
+    }
+    return value;
+  }
+
+  AuthToken _parseAuthToken(Map<String, dynamic> body) {
+    final tokenData = body['data'] ?? body;
+    if (tokenData is Map<String, dynamic>) {
+      final nested = tokenData['tokens'];
+      if (nested is Map<String, dynamic>) {
+        return AuthToken.fromJson(nested);
+      }
+      return AuthToken.fromJson(tokenData);
+    }
+    return AuthToken.fromJson(const {});
+  }
+
+  Future<void> _persistAuthToken(AuthToken authToken) async {
+    _isAuthFailed = false;
+    dev.log('[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. expiresIn: ${authToken.expiresIn}');
+    // Cập nhật cache đồng bộ trong RAM trước để đảm bảo các request tiếp theo
+    // hoặc request retry có thể đọc được ngay lập tức, tránh write-to-read delay của OS Keyring.
+    _accessTokenCache = authToken.accessToken;
+    if (authToken.refreshToken != null) {
+      _refreshTokenCache = authToken.refreshToken!;
+    }
+    if (authToken.expiresIn != null) {
+      _tokenExpiryCache = DateTime.now()
+          .add(Duration(seconds: authToken.expiresIn!))
+          .millisecondsSinceEpoch;
+      dev.log('[SDK Auth #${identityHashCode(this)}] Calculated in-memory _tokenExpiryCache: $_tokenExpiryCache');
+    }
+
+    // Ghi xuống bộ lưu trữ bất đồng bộ của OS để khôi phục phiên đăng nhập sau này.
+    await storage.saveAccessToken(authToken.accessToken);
+    if (authToken.refreshToken != null) {
+      await storage.saveRefreshToken(authToken.refreshToken!);
+    }
+    if (authToken.expiresIn != null) {
+      await storage.saveTokenExpiry(authToken.expiresIn!);
+    }
+
+    if (_tokenExpiryCache != null) {
+      _scheduleAutoRefresh(_tokenExpiryCache!);
+    } else {
+      unawaited(_restoreAutoRefresh());
+    }
+  }
+
+  Future<void> _clearTokensSafely() async {
+    _isAuthFailed = true;
+    dev.log('[SDK Auth #${identityHashCode(this)}] _clearTokensSafely() called. Clearing all cached and stored tokens.');
+    _accessTokenCache = null;
+    _refreshTokenCache = null;
+    _tokenExpiryCache = null;
+    try {
+      await storage.clear();
+    } catch (_) {}
   }
 
   bool _looksLikeSocialOnlyPasswordCase(dynamic responseData) {
     if (responseData is! Map<String, dynamic>) return false;
-    final directMessage = responseData['message']?.toString().toLowerCase() ?? '';
+    final directMessage =
+        responseData['message']?.toString().toLowerCase() ?? '';
     final dataMessage = (responseData['data'] is Map<String, dynamic>)
         ? (responseData['data']['message']?.toString().toLowerCase() ?? '')
         : '';

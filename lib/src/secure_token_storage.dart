@@ -21,7 +21,7 @@ class SecureTokenStorage implements TokenStorage {
                 storageCipherAlgorithm: StorageCipherAlgorithm.AES_GCM_NoPadding,
               ),
               iOptions: IOSOptions(
-                accessibility: KeychainAccessibility.first_this_device_this_app_only,
+                accessibility: KeychainAccessibility.first_unlock_this_device,
               ),
             );
 
