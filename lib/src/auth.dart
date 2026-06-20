@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 import 'package:dio/dio.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'models.dart';
 import 'generated/auth_models.dart';
 
@@ -86,6 +87,36 @@ class AuthManager {
   String? _refreshTokenCache;
   int? _tokenExpiryCache;
   bool _isAuthFailed = false;
+
+  final _secureStorage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      keyCipherAlgorithm: KeyCipherAlgorithm.RSA_ECB_OAEPwithSHA_256andMGF1Padding,
+      storageCipherAlgorithm: StorageCipherAlgorithm.AES_GCM_NoPadding,
+    ),
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+    ),
+  );
+
+  static const String _keyKratosSessionToken = 'keemos_kratos_session_token';
+  String? _kratosSessionTokenCache;
+  String? _recoveryFlowIdCache;
+
+  Future<void> _saveKratosSessionToken(String token) async {
+    _kratosSessionTokenCache = token;
+    await _secureStorage.write(key: _keyKratosSessionToken, value: token);
+  }
+
+  Future<String?> _getKratosSessionToken() async {
+    if (_kratosSessionTokenCache != null) return _kratosSessionTokenCache;
+    _kratosSessionTokenCache = await _secureStorage.read(key: _keyKratosSessionToken);
+    return _kratosSessionTokenCache;
+  }
+
+  Future<void> _clearKratosSessionToken() async {
+    _kratosSessionTokenCache = null;
+    await _secureStorage.delete(key: _keyKratosSessionToken);
+  }
 
   Future<String?> _getAccessToken() async {
     if (_accessTokenCache != null) return _accessTokenCache;
@@ -209,22 +240,94 @@ class AuthManager {
     required String password,
     String? fullName,
   }) async {
-    final req = RegisterRequest(
-      email: email,
-      password: password,
-      fullName: fullName,
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+
+    // Bước 1: Khởi tạo Registration Flow trên Kratos
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/registration/api',
+      options: Options(
+        headers: {'Accept': 'application/json'},
+      ),
     );
-    final resp = await _dio.post('/api/v1/auth/register', data: req.toJson());
-    final body = resp.data as Map<String, dynamic>;
-    final authToken = _parseAuthToken(body);
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Gửi thông tin đăng ký lên Kratos
+    final registrationResp = await _dio.post(
+      '$baseDomain/kratos/self-service/registration',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'password',
+        'traits': {
+          'email': email,
+          'full_name': fullName ?? email.split('@').first,
+        },
+        'password': password,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ),
+    );
+    final registrationBody = registrationResp.data as Map<String, dynamic>;
+    final sessionToken = registrationBody['session_token'] as String;
+
+    // Lưu Kratos Session Token
+    await _saveKratosSessionToken(sessionToken);
+
+    // Bước 3: Đổi Kratos Session lấy Keemos JWT
+    final sessionResp = await _dio.get(
+      '$baseDomain/api/v1/auth/session/kratos',
+      options: Options(
+        headers: {
+          'Cookie': 'ory_kratos_session=$sessionToken',
+          'Authorization': 'Bearer $sessionToken',
+          'X-Session-Token': sessionToken,
+          'Accept': 'application/json',
+        },
+      ),
+    );
+    final sessionBody = sessionResp.data as Map<String, dynamic>;
+    final authToken = _parseAuthToken(sessionBody);
     await _persistAuthToken(authToken);
+
     return authToken;
   }
 
   /// Request a password-reset OTP for [email].
   Future<void> forgotPassword(String email) async {
-    final req = ForgotPasswordRequest(email: email);
-    await _dio.post('/api/v1/auth/forgot-password', data: req.toJson());
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+
+    // Bước 1: Khởi tạo recovery flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/recovery/api',
+      options: Options(
+        headers: {'Accept': 'application/json'},
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Gửi email yêu cầu nhận mã khôi phục
+    await _dio.post(
+      '$baseDomain/kratos/self-service/recovery',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'code',
+        'email': email,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ),
+    );
+    _recoveryFlowIdCache = flowId;
   }
 
   /// Reset password using OTP from email.
@@ -233,12 +336,68 @@ class AuthManager {
     required String otp,
     required String newPassword,
   }) async {
-    final req = ResetPasswordRequest(
-      email: email,
-      otp: otp,
-      newPassword: newPassword,
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+
+    var flowId = _recoveryFlowIdCache;
+    if (flowId == null || flowId.isEmpty) {
+      final flowResp = await _dio.get(
+        '$baseDomain/kratos/self-service/recovery/api',
+        options: Options(
+          headers: {'Accept': 'application/json'},
+        ),
+      );
+      final flowBody = flowResp.data as Map<String, dynamic>;
+      flowId = flowBody['id'] as String;
+    }
+
+    // Bước 3: Gửi mã OTP khôi phục nhận được từ email
+    final submitOtpResp = await _dio.post(
+      '$baseDomain/kratos/self-service/recovery',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'code',
+        'code': otp,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ),
     );
-    await _dio.post('/api/v1/auth/reset-password', data: req.toJson());
+    final submitOtpBody = submitOtpResp.data as Map<String, dynamic>;
+    final tempSessionToken = submitOtpBody['session_token'] as String;
+
+    // Bước 4: Đặt lại mật khẩu mới bằng settings flow với session token tạm thời này
+    final settingsFlowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/settings/api',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Session-Token': tempSessionToken,
+        },
+      ),
+    );
+    final settingsFlowBody = settingsFlowResp.data as Map<String, dynamic>;
+    final settingsFlowId = settingsFlowBody['id'] as String;
+
+    await _dio.post(
+      '$baseDomain/kratos/self-service/settings',
+      queryParameters: {'flow': settingsFlowId},
+      data: {
+        'method': 'password',
+        'password': newPassword,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Session-Token': tempSessionToken,
+        },
+      ),
+    );
+    _recoveryFlowIdCache = null;
   }
 
   /// Social login (Google, Facebook, Apple)
@@ -280,6 +439,7 @@ class AuthManager {
       );
       final submitBody = submitResp.data as Map<String, dynamic>;
       final sessionToken = submitBody['session_token'] as String;
+      await _saveKratosSessionToken(sessionToken);
 
       // Bước 3: Đổi Kratos Session lấy Keemos JWT
       dev.log('[SDK Auth] Step 3: Exchange Kratos Session for Keemos JWT');
@@ -316,6 +476,30 @@ class AuthManager {
   Future<void> logout() async {
     _autoRefreshTimer?.cancel();
     _autoRefreshTimer = null;
+
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+    final kratosToken = await _getKratosSessionToken();
+
+    if (kratosToken != null && kratosToken.isNotEmpty) {
+      try {
+        await _dio.delete(
+          '$baseDomain/kratos/self-service/logout/api',
+          data: {
+            'session_token': kratosToken,
+          },
+          options: Options(
+            headers: {
+              'Accept': 'application/json',
+            },
+          ),
+        );
+      } catch (e) {
+        dev.log('[SDK Auth] Kratos logout error: $e');
+      }
+      await _clearKratosSessionToken();
+    }
+
     try {
       await _dio.post('/api/v1/auth/logout');
     } catch (_) {}
@@ -381,55 +565,160 @@ class AuthManager {
 
   /// Change password for current authenticated user.
   ///
-  /// Requires a valid access token. If the token is expired, this method will
-  /// try one refresh and retry once. Backend may return HTTP 400 for social
-  /// accounts that have never set a manual password.
+  /// Requires a valid Kratos session token or access token.
   Future<void> changePassword({
     required String oldPassword,
     required String newPassword,
   }) async {
-    final access = await _getAccessToken();
-    if (access == null || access.isEmpty) {
-      throw StateError(
-          'No access token found. Login is required before changePassword.');
-    }
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+    final kratosToken = await _getKratosSessionToken();
 
-    final payload = ChangePasswordRequest(
-      oldPassword: oldPassword,
-      newPassword: newPassword,
-    ).toJson();
-
-    Future<Response<dynamic>> send(String token) {
-      return _dio.post(
-        '/api/v1/auth/change-password',
-        data: payload,
-        options: Options(headers: {'Authorization': 'Bearer $token'}),
-      );
-    }
-
-    try {
-      await send(access);
-      return;
-    } on DioException catch (e) {
-      final statusCode = e.response?.statusCode;
-      if (statusCode == 400 &&
-          _looksLikeSocialOnlyPasswordCase(e.response?.data)) {
-        throw ChangePasswordNotAllowedException();
+    if (kratosToken == null || kratosToken.isEmpty) {
+      dev.log('[SDK Auth] Kratos token not found. Falling back to core-api changePassword');
+      final access = await _getAccessToken();
+      if (access == null || access.isEmpty) {
+        throw StateError('No access token found. Login is required before changePassword.');
       }
 
-      if (statusCode == 401) {
-        final refreshed = await tryRefresh();
-        if (refreshed) {
-          final refreshedAccess = await _getAccessToken();
-          if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
-            await send(refreshedAccess);
-            return;
-          }
+      final payload = ChangePasswordRequest(
+        oldPassword: oldPassword,
+        newPassword: newPassword,
+      ).toJson();
+
+      try {
+        await _dio.post(
+          '/api/v1/auth/change-password',
+          data: payload,
+          options: Options(headers: {'Authorization': 'Bearer $access'}),
+        );
+        return;
+      } on DioException catch (e) {
+        final statusCode = e.response?.statusCode;
+        if (statusCode == 400 && _looksLikeSocialOnlyPasswordCase(e.response?.data)) {
+          throw ChangePasswordNotAllowedException();
         }
+        rethrow;
       }
-
-      rethrow;
     }
+
+    // Bước 1: Khởi tạo settings flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/settings/api',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Thực hiện đổi mật khẩu
+    await _dio.post(
+      '$baseDomain/kratos/self-service/settings',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'password',
+        'password': newPassword,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+  }
+
+  /// Update user profile (full name, avatar, etc.) via Kratos Settings Flow.
+  Future<void> updateProfile({
+    required String email,
+    required String fullName,
+    String? avatarUrl,
+  }) async {
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+    final kratosToken = await _getKratosSessionToken();
+    if (kratosToken == null || kratosToken.isEmpty) {
+      throw StateError('Kratos session token not found. Login/Registration via Kratos is required.');
+    }
+
+    // Bước 1: Khởi tạo settings flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/settings/api',
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Thực hiện cập nhật profile
+    final traits = {
+      'email': email,
+      'full_name': fullName,
+    };
+    if (avatarUrl != null) {
+      traits['avatar_url'] = avatarUrl;
+    }
+
+    await _dio.post(
+      '$baseDomain/kratos/self-service/settings',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'profile',
+        'traits': traits,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Session-Token': kratosToken,
+        },
+      ),
+    );
+  }
+
+  /// Verify email address using the OTP code received from Kratos.
+  Future<void> verifyEmail({
+    required String email,
+    required String code,
+  }) async {
+    final baseUri = Uri.parse(_dio.options.baseUrl);
+    final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+
+    // Bước 1: Khởi tạo verification flow
+    final flowResp = await _dio.get(
+      '$baseDomain/kratos/self-service/verification/api',
+      options: Options(
+        headers: {'Accept': 'application/json'},
+      ),
+    );
+    final flowBody = flowResp.data as Map<String, dynamic>;
+    final flowId = flowBody['id'] as String;
+
+    // Bước 2: Gửi mã xác minh
+    await _dio.post(
+      '$baseDomain/kratos/self-service/verification',
+      queryParameters: {'flow': flowId},
+      data: {
+        'method': 'code',
+        'email': email,
+        'code': code,
+      },
+      options: Options(
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+      ),
+    );
   }
 
   /// Fetch current authenticated user's profile.
@@ -703,6 +992,7 @@ class AuthManager {
     _accessTokenCache = null;
     _refreshTokenCache = null;
     _tokenExpiryCache = null;
+    await _clearKratosSessionToken();
     try {
       await storage.clear();
     } catch (_) {}
