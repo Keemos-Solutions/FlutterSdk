@@ -13,15 +13,16 @@ class AuthApi {
     String password, {
     String? deviceName,
   }) async {
-    final req = LoginRequest(
-      email: email,
-      password: password,
+    final token = await client.authManager.login(
+      email,
+      password,
       deviceName: deviceName,
     );
-    final resp =
-        await client.post('/api/v1/auth/login', data: req.toJson());
-    final body = resp.data as Map<String, dynamic>;
-    return TokenResponse.fromJson(body['data'] ?? body);
+    return TokenResponse(
+      accessToken: token.accessToken,
+      expiresIn: token.expiresIn ?? 3600,
+      tokenType: 'Bearer',
+    );
   }
 
   Future<TokenResponse> register({
@@ -29,20 +30,20 @@ class AuthApi {
     required String password,
     String? fullName,
   }) async {
-    final req = RegisterRequest(
+    final token = await client.authManager.register(
       email: email,
       password: password,
       fullName: fullName,
     );
-    final resp =
-        await client.post('/api/v1/auth/register', data: req.toJson());
-    final body = resp.data as Map<String, dynamic>;
-    return TokenResponse.fromJson(body['data'] ?? body);
+    return TokenResponse(
+      accessToken: token.accessToken,
+      expiresIn: token.expiresIn ?? 3600,
+      tokenType: 'Bearer',
+    );
   }
 
   Future<void> forgotPassword(String email) async {
-    final req = ForgotPasswordRequest(email: email);
-    await client.post('/api/v1/auth/forgot-password', data: req.toJson());
+    await client.authManager.forgotPassword(email);
   }
 
   Future<void> resetPassword({
@@ -50,16 +51,15 @@ class AuthApi {
     required String otp,
     required String newPassword,
   }) async {
-    final req = ResetPasswordRequest(
+    await client.authManager.resetPassword(
       email: email,
       otp: otp,
       newPassword: newPassword,
     );
-    await client.post('/api/v1/auth/reset-password', data: req.toJson());
   }
 
   Future<void> logout() async {
-    await client.post('/api/v1/auth/logout');
+    await client.authManager.logout();
   }
 
   /// Link a social account (Google/Facebook/Apple) to current authenticated user.
@@ -79,11 +79,10 @@ class AuthApi {
     required String oldPassword,
     required String newPassword,
   }) async {
-    final req = ChangePasswordRequest(
+    await client.authManager.changePassword(
       oldPassword: oldPassword,
       newPassword: newPassword,
     );
-    await client.post('/api/v1/auth/change-password', data: req.toJson());
   }
 
   Future<UserProfile> getProfile() async {
