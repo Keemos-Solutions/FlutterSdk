@@ -34,6 +34,8 @@ class HouseholdsApi {
     String? address,
     String? city,
     HouseholdType? type,
+    double? latitude,
+    double? longitude,
   }) async {
     if (name.trim().isEmpty) {
       throw ArgumentError('name must be at least 1 character.');
@@ -44,10 +46,12 @@ class HouseholdsApi {
       if (address != null) 'address': address,
       if (city != null) 'city': city,
       if (type != null) 'type': type.wireValue,
+      if (latitude != null) 'latitude': latitude,
+      if (longitude != null) 'longitude': longitude,
     };
 
     // Backend enforces Owner/Admin permissions for this endpoint.
-    final resp = await client.dio.put('/api/v1/households/$householdId', data: payload);
+    final resp = await client.put('/api/v1/households/$householdId', data: payload);
     final body = resp.data as Map<String, dynamic>;
     final data = body['data'] as Map<String, dynamic>? ?? body;
 
@@ -77,7 +81,7 @@ class HouseholdsApi {
   }
 
   Future<void> removeMember(String householdId, String userId) async {
-    await client.dio.delete('/api/v1/households/$householdId/members/$userId');
+    await client.delete('/api/v1/households/$householdId/members/$userId');
     await client.invalidateCacheByPrefix('/api/v1/households/$householdId/members');
   }
 

@@ -1,12 +1,25 @@
 # Keemos SDK (user-only)
 
-This repository contains a minimal Pure Dart SDK scaffold for Keemos IoT user APIs (auth, households, devices, rooms, automations, notifications).
+This repository contains a Pure Dart SDK for Keemos IoT user APIs (auth, households, devices, rooms, automations, notifications, **Matter**).
 
 What is included:
-- `lib/` core SDK entrypoint and a minimal implementation of client, auth, models
+- `lib/` core SDK entrypoint and API wrappers
+- Matter cloud API: `client.matter` (`MatterApi`) + models in `models_matter.dart` — matches `MOBILE_MATTER_INTEGRATION.md` / core-api
 - `openapi-user-only.yaml` filtered spec used as a source of truth
-- `test/` skeleton for unit tests
+- `test/` unit tests (including `matter_test.dart`)
 - GitHub Actions CI (format/analyze/test)
+
+### Matter (`client.matter`)
+
+| Method | Path |
+|--------|------|
+| `registerDevice` | `POST /households/{id}/matter/devices` |
+| `patchDeviceMatter` | `PATCH /devices/{id}/matter` |
+| `putFabricPackage` / `getFabricPackage` / `getFabricPackageMeta` | fabric-package |
+| `upsertControllerMe` / `listControllers` | controllers |
+| `putHFSKWrap` / `getHFSKWrapMe` | HFSK wraps |
+
+`Device.matter` is optional nested inventory (`MatterDeviceSummary`). Secrets never go on inventory APIs.
 
 Next: generate full models from OpenAPI or implement more API wrappers.
 

@@ -15,7 +15,7 @@ void main() {
     expect(h.name, 'Home');
     expect(h.address, 'Addr');
     expect(h.city, 'Ha Noi');
-    expect(h.type, 'villa');
+    expect(h.type, HouseholdType.villa);
   });
 
   test('Household.fromJson supports householdId', () {
@@ -36,7 +36,7 @@ void main() {
       name: 'Home',
       address: '456 XYZ',
       city: 'Ha Noi',
-      type: 'villa',
+      type: HouseholdType.villa,
     );
     final out = h.toJson();
     expect(out['household_id'], 'abc');

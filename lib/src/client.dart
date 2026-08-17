@@ -7,6 +7,8 @@ import 'apis/devices_api.dart';
 import 'apis/rooms_api.dart';
 import 'apis/automations_api.dart';
 import 'apis/notifications_api.dart';
+import 'apis/matter_api.dart';
+import 'apis/tuya_api.dart';
 import 'cache.dart';
 
 class CachePolicyEntry {
@@ -35,14 +37,18 @@ class KeemosClient {
         defaultCacheOptions = defaultCacheOptions ?? const CacheOptions(ttl: Duration(seconds: 45)) {
     this.dio.options.baseUrl = 'https://api.keemos.vn';
     this.dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) async {
-      final token = await authManager.getAccessToken();
-      if (token != null && token.isNotEmpty) {
-        options.headers['Authorization'] = 'Bearer $token';
+      if (!options.headers.containsKey('Authorization')) {
+        final token = await authManager.getAccessToken();
+        if (token != null && token.isNotEmpty) {
+          options.headers['Authorization'] = 'Bearer $token';
+        }
       }
       return handler.next(options);
     }, onError: (error, handler) async {
       // Handle 401 Unauthorized - try to refresh token
-      if (error.response?.statusCode == 401 && error.requestOptions.path != '/api/v1/auth/refresh') {
+      if (error.response?.statusCode == 401 &&
+          !error.requestOptions.path.contains('/auth/refresh') &&
+          !error.requestOptions.path.contains('/auth/session/kratos')) {
         final refreshed = await authManager.tryRefresh();
         if (refreshed) {
           final token = await authManager.getAccessToken();
@@ -66,14 +72,48 @@ class KeemosClient {
     rooms = RoomsApi(this);
     automations = AutomationsApi(this);
     notifications = NotificationsApi(this);
+    matter = MatterApi(this);
+    tuya = TuyaApi(this);
 
     this.authManager.onLogout = () async {
       await this.cacheManager?.clear();
     };
   }
 
-  Future<Response> post(String path, {dynamic data, Map<String, dynamic>? queryParameters}) {
-    return dio.post(path, data: data, queryParameters: queryParameters);
+  Future<Response<T>> post<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return dio.post<T>(path, data: data, queryParameters: queryParameters, options: options);
+  }
+
+  Future<Response<T>> put<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return dio.put<T>(path, data: data, queryParameters: queryParameters, options: options);
+  }
+
+  Future<Response<T>> patch<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return dio.patch<T>(path, data: data, queryParameters: queryParameters, options: options);
+  }
+
+  Future<Response<T>> delete<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return dio.delete<T>(path, data: data, queryParameters: queryParameters, options: options);
   }
 
   Future<Response> get(String path, {Map<String, dynamic>? queryParameters, CacheOptions? cacheOptions}) async {
@@ -82,7 +122,7 @@ class KeemosClient {
     final key = _buildCacheKey('GET', path, queryParameters);
 
     if (manager != null && effectiveOptions.enabled && !effectiveOptions.forceRefresh) {
-      final entry = await manager.read(key);
+      final entry = await manager.read(key, allowExpired: effectiveOptions.staleWhileRevalidate);
       if (entry != null) {
         if (!entry.isExpired) {
           return _responseFromCache(entry, path, queryParameters);
@@ -169,6 +209,8 @@ class KeemosClient {
   late final RoomsApi rooms;
   late final AutomationsApi automations;
   late final NotificationsApi notifications;
+  late final MatterApi matter;
+  late final TuyaApi tuya;
 }
 
 const List<CachePolicyEntry> _defaultCachePolicies = [
@@ -195,5 +237,9 @@ const List<CachePolicyEntry> _defaultCachePolicies = [
   CachePolicyEntry(
     '/api/v1/auth/profile',
     CacheOptions(ttl: Duration(minutes: 2), staleWhileRevalidate: true),
+  ),
+  CachePolicyEntry(
+    '/api/v1/integrations',
+    CacheOptions(ttl: Duration(minutes: 1), staleWhileRevalidate: true),
   ),
 ];

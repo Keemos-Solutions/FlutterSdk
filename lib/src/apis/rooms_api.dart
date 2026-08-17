@@ -10,7 +10,7 @@ class RoomsApi {
     final resp = await client.get('/api/v1/households/$householdId/rooms');
     final body = resp.data as Map<String, dynamic>;
     final data = body['data'] as List<dynamic>? ?? [];
-    return data.cast<Map<String, dynamic>>();
+    return data.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
   /// Get a single room by id (best-effort; may return null when not found)
@@ -18,7 +18,7 @@ class RoomsApi {
     final resp = await client.get('/api/v1/households/$householdId/rooms/$roomId');
     final body = resp.data as Map<String, dynamic>;
     final payload = body['data'] as Map<String, dynamic>? ?? body;
-    return payload.cast<String, dynamic>();
+    return Map<String, dynamic>.from(payload);
   }
 
   /// Create a room in a household (`POST /api/v1/households/{id}/rooms`).
@@ -30,7 +30,7 @@ class RoomsApi {
     final body = resp.data as Map<String, dynamic>;
     final data = body['data'] as Map<String, dynamic>? ?? body;
     await client.invalidateCacheByPrefix('/api/v1/households/$householdId/rooms');
-    return data.cast<String, dynamic>();
+    return Map<String, dynamic>.from(data);
   }
 
   /// Update a room's information (`PUT /api/v1/households/{household_id}/rooms/{room_id}`).
@@ -39,19 +39,19 @@ class RoomsApi {
     String roomId,
     Map<String, dynamic> payload,
   ) async {
-    final resp = await client.dio.put(
+    final resp = await client.put(
       '/api/v1/households/$householdId/rooms/$roomId',
       data: payload,
     );
     final body = resp.data as Map<String, dynamic>;
     final data = body['data'] as Map<String, dynamic>? ?? body;
     await client.invalidateCacheByPrefix('/api/v1/households/$householdId/rooms');
-    return data.cast<String, dynamic>();
+    return Map<String, dynamic>.from(data);
   }
 
   /// Delete a room (`DELETE /api/v1/households/{household_id}/rooms/{room_id}`).
   Future<void> deleteRoom(String householdId, String roomId) async {
-    await client.dio.delete('/api/v1/households/$householdId/rooms/$roomId');
+    await client.delete('/api/v1/households/$householdId/rooms/$roomId');
     await client.invalidateCacheByPrefix('/api/v1/households/$householdId/rooms');
   }
 }

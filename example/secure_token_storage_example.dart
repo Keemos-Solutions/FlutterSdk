@@ -28,10 +28,7 @@ class KeemosAuthExample {
 
       // 4. Create KeemosClient (handles automatic token refresh on 401)
       final client = KeemosClient(authManager: authManager);
-
-      // 5. Make API calls - tokens are automatically attached
-      // If token expires, SDK automatically refreshes it
-      // final households = await client.household.getHouseholds();
+      print('Client initialized for: ${client.dio.options.baseUrl}');
 
     } catch (e) {
       print('Authentication failed: $e');
@@ -94,6 +91,7 @@ class KeemosAuthExample {
     );
 
     final client = KeemosClient(authManager: authManager);
+    print('Client initialized for error recovery demo: ${client.dio.options.baseUrl}');
 
     try {
       // The SDK automatically handles:

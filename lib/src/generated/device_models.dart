@@ -1,3 +1,5 @@
+import '../models_matter.dart';
+
 class Device {
   final String id;
   final String? householdId;
@@ -17,6 +19,9 @@ class Device {
   final Map<String, dynamic>? profile;
   final Map<String, dynamic>? room;
 
+  /// Present when the device has a `matter_device_bindings` row.
+  final MatterDeviceSummary? matter;
+
   Device({
     required this.id,
     this.householdId,
@@ -35,27 +40,43 @@ class Device {
     this.updatedAt,
     this.profile,
     this.room,
+    this.matter,
   });
 
-  factory Device.fromJson(Map<String, dynamic> json) => Device(
-        id: json['id'] ?? json['device_id'] ?? json['deviceId'] ?? '',
-        householdId: json['household_id'] ?? json['householdId'],
-        roomId: json['room_id'] ?? json['roomId'],
-        userId: json['user_id'] ?? json['userId'],
-        profileId: json['profile_id'] ?? json['profileId'],
-        name: json['name'],
-        serialNumber: json['serial_number'] ?? json['serialNumber'],
-        firmwareVersion: json['firmware_version'] ?? json['firmwareVersion'],
-        connectionType: json['connection_type'] ?? json['connectionType'],
-        status: json['status'],
-        state: _readMap(json['state']),
-        config: _readMap(json['config']),
-        lastSeenAt: _readDateTime(json['last_seen_at'] ?? json['lastSeenAt']),
-        createdAt: _readDateTime(json['created_at'] ?? json['createdAt']),
-        updatedAt: _readDateTime(json['updated_at'] ?? json['updatedAt']),
-        profile: _readNullableMap(json['profile']),
-        room: _readNullableMap(json['room']),
+  factory Device.fromJson(Map<String, dynamic> json) {
+    MatterDeviceSummary? matter;
+    final rawMatter = json['matter'];
+    if (rawMatter is Map<String, dynamic>) {
+      matter = MatterDeviceSummary.fromJson(rawMatter);
+    } else if (rawMatter is Map) {
+      matter = MatterDeviceSummary.fromJson(
+        Map<String, dynamic>.from(
+          rawMatter.map((k, v) => MapEntry(k.toString(), v)),
+        ),
       );
+    }
+
+    return Device(
+      id: json['id'] ?? json['device_id'] ?? json['deviceId'] ?? '',
+      householdId: json['household_id'] ?? json['householdId'],
+      roomId: json['room_id'] ?? json['roomId'],
+      userId: json['user_id'] ?? json['userId'],
+      profileId: json['profile_id'] ?? json['profileId'],
+      name: json['name'],
+      serialNumber: json['serial_number'] ?? json['serialNumber'],
+      firmwareVersion: json['firmware_version'] ?? json['firmwareVersion'],
+      connectionType: json['connection_type'] ?? json['connectionType'],
+      status: json['status'],
+      state: _readMap(json['state']),
+      config: _readMap(json['config']),
+      lastSeenAt: _readDateTime(json['last_seen_at'] ?? json['lastSeenAt']),
+      createdAt: _readDateTime(json['created_at'] ?? json['createdAt']),
+      updatedAt: _readDateTime(json['updated_at'] ?? json['updatedAt']),
+      profile: _readNullableMap(json['profile']),
+      room: _readNullableMap(json['room']),
+      matter: matter,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -75,6 +96,7 @@ class Device {
         'updated_at': updatedAt?.toIso8601String(),
         'profile': profile,
         'room': room,
+        if (matter != null) 'matter': matter!.toJson(),
       };
 }
 
@@ -118,7 +140,7 @@ class DeviceState {
 
   factory DeviceState.fromJson(Map<String, dynamic> json) => DeviceState(
         attributes: (json['attributes'] as Map<String, dynamic>?) ?? (json['state'] as Map<String, dynamic>?) ?? Map<String, dynamic>.from(json),
-        updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']) : (json['updatedAt'] != null ? DateTime.parse(json['updatedAt']) : null),
+        updatedAt: _readDateTime(json['updated_at'] ?? json['updatedAt']),
       );
 
   Map<String, dynamic> toJson() => {

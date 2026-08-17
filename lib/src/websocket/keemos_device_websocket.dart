@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
+import 'dart:developer' as developer;
 
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:centrifuge/centrifuge.dart' as centrifuge;
 
-import 'keemos_ws_url.dart';
+import '../client.dart';
 
 /// Server → client event (IoT platform WebSocket).
 class KeemosWsInboundEvent {
@@ -40,147 +40,214 @@ class KeemosWsInboundEvent {
   }
 }
 
-typedef KeemosAccessTokenGetter = Future<String?> Function();
-
-/// Parses one text WebSocket frame (may contain multiple newline-delimited JSON lines).
-/// Empty lines are skipped; [`event` == `pong`] entries are omitted (heartbeat).
-List<KeemosWsInboundEvent> parseKeemosWsTextFrame(String message) {
-  final out = <KeemosWsInboundEvent>[];
-  for (final raw in message.split('\n')) {
-    final line = raw.trim();
-    if (line.isEmpty) continue;
-    Map<String, dynamic>? map;
+/// Parses newline-delimited JSON text frames for legacy/raw WebSocket connections.
+List<KeemosWsInboundEvent> parseKeemosWsTextFrame(String text) {
+  final lines = const LineSplitter().convert(text);
+  final events = <KeemosWsInboundEvent>[];
+  for (final line in lines) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) continue;
     try {
-      final decoded = jsonDecode(line);
+      final decoded = jsonDecode(trimmed);
       if (decoded is Map<String, dynamic>) {
-        map = decoded;
-      } else if (decoded is Map) {
-        map = Map<String, dynamic>.from(
-          decoded.map((k, v) => MapEntry(k.toString(), v)),
-        );
+        if (decoded['event'] == 'pong') continue;
+        events.add(KeemosWsInboundEvent.fromJson(decoded));
       }
-    } catch (_) {
-      continue;
-    }
-    if (map == null) continue;
-    final ev = KeemosWsInboundEvent.fromJson(map);
-    if (ev.event == 'pong') continue;
-    out.add(ev);
+    } catch (_) {}
   }
-  return out;
+  return events;
 }
 
-/// WebSocket client: `/api/v1/ws`, newline-delimited JSON, reconnect with backoff.
+/// Centrifugo-based WebSocket controller for real-time telemetry.
 class KeemosDeviceWebSocketController {
   KeemosDeviceWebSocketController({
-    required this.resolveBaseUrl,
-    required this.getAccessToken,
+    required this.client,
     required this.onEvent,
   });
 
-  final String Function() resolveBaseUrl;
-  final KeemosAccessTokenGetter getAccessToken;
+  final KeemosClient client;
   final void Function(KeemosWsInboundEvent event) onEvent;
 
-  WebSocketChannel? _channel;
-  StreamSubscription<dynamic>? _subscription;
+  centrifuge.Client? _centrifugeClient;
+  centrifuge.Subscription? _subscription;
+  StreamSubscription<centrifuge.PublicationEvent>? _pubSub;
+  StreamSubscription<centrifuge.ConnectedEvent>? _connectedSub;
+  StreamSubscription<centrifuge.DisconnectedEvent>? _disconnectedSub;
+
   Timer? _reconnectTimer;
   int _attempt = 0;
   String? _householdId;
+  bool _isConnecting = false;
   bool _disposed = false;
 
   static const _maxBackoffMs = 30000;
-  static const _baseBackoffMs = 500;
+  static const _baseBackoffMs = 1000;
 
   Future<void> start(String householdId) async {
+    developer.log('Starting WebSocket for household: $householdId', name: 'KeemosWS');
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _householdId = householdId;
     _disposed = false;
     await _connect();
   }
 
   Future<void> _connect() async {
-    if (_disposed) return;
+    if (_disposed || _isConnecting) return;
     final hid = _householdId;
     if (hid == null) return;
 
-    await _subscription?.cancel();
-    _subscription = null;
-    await _channel?.sink.close();
-    _channel = null;
-
-    final token = await getAccessToken();
-    if (token == null || token.isEmpty) {
-      _scheduleReconnect();
-      return;
-    }
-
-    final uri = buildKeemosWebSocketUri(
-      httpBaseUrl: resolveBaseUrl(),
-      token: token,
-      householdId: hid,
-    );
+    _isConnecting = true;
+    await _cleanup();
 
     try {
-      _channel = WebSocketChannel.connect(uri);
-      _attempt = 0;
-      _subscription = _channel!.stream.listen(
-        _onMessage,
-        onError: (_) => _scheduleReconnect(),
-        onDone: _scheduleReconnect,
-        cancelOnError: false,
-      );
-    } catch (_) {
-      _scheduleReconnect();
-    }
-  }
+      developer.log('Fetching connection token...', name: 'KeemosWS');
+      final wsTokenResp = await client.post('/api/v1/ws/token');
+      if (_disposed || _householdId != hid) return;
 
-  void _onMessage(dynamic message) {
-    if (message is! String) return;
-    for (final ev in parseKeemosWsTextFrame(message)) {
-      onEvent(ev);
+      final wsTokenData = wsTokenResp.data as Map<String, dynamic>;
+      final connectionToken = wsTokenData['token'] as String;
+      final centrifugoUrl = wsTokenData['centrifugo_url'] as String;
+
+      developer.log('Initializing Centrifugo client with URL: $centrifugoUrl', name: 'KeemosWS');
+      final config = centrifuge.ClientConfig(
+        token: connectionToken,
+        getToken: (event) async {
+          developer.log('Refreshing expired connection token...', name: 'KeemosWS');
+          try {
+            final resp = await client.post('/api/v1/ws/token');
+            final data = resp.data as Map<String, dynamic>;
+            return data['token'] as String;
+          } catch (e) {
+            developer.log('Failed to refresh connection token: $e', name: 'KeemosWS', error: e);
+            return '';
+          }
+        },
+      );
+
+      final cClient = centrifuge.createClient(centrifugoUrl, config);
+      _centrifugeClient = cClient;
+
+      _connectedSub = cClient.connected.listen((e) {
+        developer.log('Successfully connected to Centrifugo server', name: 'KeemosWS');
+        _attempt = 0;
+      });
+
+      _disconnectedSub = cClient.disconnected.listen((e) {
+        developer.log('Disconnected from Centrifugo server (code: ${e.code}, reason: ${e.reason})', name: 'KeemosWS');
+      });
+
+      developer.log('Connecting to Centrifugo...', name: 'KeemosWS');
+      await cClient.connect();
+
+      if (_disposed || _centrifugeClient != cClient || _householdId != hid) return;
+
+      developer.log('Fetching channel token for household: $hid', name: 'KeemosWS');
+      final channelTokenResp = await client.post(
+        '/api/v1/ws/channel-token',
+        data: {'household_id': hid},
+      );
+      if (_disposed || _centrifugeClient != cClient || _householdId != hid) return;
+
+      final channelTokenData = channelTokenResp.data as Map<String, dynamic>;
+      final channelToken = channelTokenData['token'] as String;
+      final channelName = channelTokenData['channel'] as String;
+
+      developer.log('Subscribing to channel: $channelName', name: 'KeemosWS');
+      final subConfig = centrifuge.SubscriptionConfig(
+        token: channelToken,
+        getToken: (event) async {
+          developer.log('Refreshing expired channel token...', name: 'KeemosWS');
+          try {
+            final resp = await client.post(
+              '/api/v1/ws/channel-token',
+              data: {'household_id': hid},
+            );
+            final data = resp.data as Map<String, dynamic>;
+            return data['token'] as String;
+          } catch (e) {
+            developer.log('Failed to refresh channel token: $e', name: 'KeemosWS', error: e);
+            return '';
+          }
+        },
+      );
+
+      final sub = cClient.newSubscription(channelName, subConfig);
+      _subscription = sub;
+
+      _pubSub = sub.publication.listen((event) {
+        try {
+          final rawData = utf8.decode(event.data);
+          final payload = jsonDecode(rawData);
+          if (payload is Map) {
+            final ev = KeemosWsInboundEvent.fromJson(Map<String, dynamic>.from(payload));
+            onEvent(ev);
+          }
+        } catch (e) {
+          developer.log('Error parsing websocket event payload: $e', name: 'KeemosWS', error: e);
+        }
+      });
+
+      await sub.subscribe();
+      developer.log('Subscription request sent for $channelName', name: 'KeemosWS');
+
+    } catch (e) {
+      developer.log('WebSocket connection error: $e', name: 'KeemosWS', error: e);
+      if (!_disposed) {
+        _scheduleReconnect();
+      }
+    } finally {
+      _isConnecting = false;
     }
   }
 
   void _scheduleReconnect() {
     if (_disposed) return;
     _reconnectTimer?.cancel();
-    final jitter = Random().nextInt(400);
-    final exp = min(
-      _maxBackoffMs,
-      _baseBackoffMs * (1 << min(_attempt, 6)),
-    );
+    final jitter = 100 + (DateTime.now().millisecondsSinceEpoch % 400);
+    final exp = (1 << (_attempt > 6 ? 6 : _attempt)) * _baseBackoffMs;
+    final backoff = exp < _maxBackoffMs ? exp : _maxBackoffMs;
     _attempt++;
-    _reconnectTimer = Timer(Duration(milliseconds: exp + jitter), () {
+
+    developer.log('Scheduling reconnect in ${backoff + jitter}ms (attempt $_attempt)', name: 'KeemosWS');
+    _reconnectTimer = Timer(Duration(milliseconds: backoff + jitter), () {
       if (!_disposed) _connect();
     });
   }
 
-  void sendPing() {
-    final ch = _channel;
-    if (ch == null) return;
-    try {
-      ch.sink.add(jsonEncode({'action': 'ping'}));
-    } catch (_) {}
-  }
-
-  void sendSubscribe(String householdId) {
-    final ch = _channel;
-    if (ch == null) return;
-    try {
-      ch.sink.add(
-        jsonEncode({'action': 'subscribe', 'household_id': householdId}),
-      );
-    } catch (_) {}
-  }
-
-  void dispose() {
-    _disposed = true;
+  Future<void> _cleanup() async {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _subscription?.cancel();
+
+    await _pubSub?.cancel();
+    _pubSub = null;
+    await _connectedSub?.cancel();
+    _connectedSub = null;
+    await _disconnectedSub?.cancel();
+    _disconnectedSub = null;
+
+    final sub = _subscription;
     _subscription = null;
-    _channel?.sink.close();
-    _channel = null;
+    if (sub != null) {
+      try {
+        await sub.unsubscribe();
+      } catch (_) {}
+    }
+
+    final cClient = _centrifugeClient;
+    _centrifugeClient = null;
+    if (cClient != null) {
+      try {
+        await cClient.disconnect();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> dispose() async {
+    developer.log('Disposing KeemosDeviceWebSocketController', name: 'KeemosWS');
+    _disposed = true;
+    _attempt = 0;
+    await _cleanup();
     _householdId = null;
   }
 }

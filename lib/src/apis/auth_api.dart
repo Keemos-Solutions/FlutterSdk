@@ -92,9 +92,10 @@ class AuthApi {
   }
 
   Future<UserProfile> updateProfile(Map<String, dynamic> updates) async {
-    final resp = await client.post('/api/v1/auth/profile', data: updates);
+    final resp = await client.patch('/api/v1/auth/user', data: updates);
     final body = resp.data as Map<String, dynamic>;
     await client.invalidateCacheByPrefix('/api/v1/auth/profile');
+    await client.invalidateCacheByPrefix('/api/v1/auth/user');
     return UserProfile.fromJson(body['data'] ?? body);
   }
 
@@ -102,7 +103,7 @@ class AuthApi {
   /// `settings` is an arbitrary JSON object stored by the backend.
   Future<Map<String, dynamic>> updateAppSettings(
       Map<String, dynamic> settings) async {
-    final resp = await client.dio
+    final resp = await client
         .patch('/api/v1/auth/app-settings', data: {'settings': settings});
     final body = resp.data as Map<String, dynamic>;
     await client.invalidateCacheByPrefix('/api/v1/auth/app-settings');

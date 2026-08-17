@@ -46,6 +46,6 @@ void main() async {
     name: 'My Home',
     address: '123 Main Street',
     city: 'Ha Noi',
-    type: 'villa',
+    type: HouseholdType.villa,
   );
 }

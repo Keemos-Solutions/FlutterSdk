@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as dev;
 import 'package:dio/dio.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'models.dart';
 import 'generated/auth_models.dart';
 
@@ -15,6 +14,10 @@ abstract class TokenStorage {
   Future<int?> readTokenExpiry();
   Future<bool> isAccessTokenExpired();
   Future<void> clear();
+
+  Future<void> saveKratosSessionToken(String token) async {}
+  Future<String?> readKratosSessionToken() async => null;
+  Future<void> clearKratosSessionToken() async {}
 }
 
 /// Simple in-memory storage (default) — replace with secure storage in Flutter example.
@@ -22,12 +25,14 @@ class InMemoryTokenStorage implements TokenStorage {
   String? _access;
   String? _refresh;
   int? _expiryMs;
+  String? _kratosSessionToken;
 
   @override
   Future<void> clear() async {
     _access = null;
     _refresh = null;
     _expiryMs = null;
+    _kratosSessionToken = null;
   }
 
   @override
@@ -60,6 +65,19 @@ class InMemoryTokenStorage implements TokenStorage {
     _expiryMs =
         DateTime.now().add(Duration(seconds: expiresIn)).millisecondsSinceEpoch;
   }
+
+  @override
+  Future<void> saveKratosSessionToken(String token) async {
+    _kratosSessionToken = token;
+  }
+
+  @override
+  Future<String?> readKratosSessionToken() async => _kratosSessionToken;
+
+  @override
+  Future<void> clearKratosSessionToken() async {
+    _kratosSessionToken = null;
+  }
 }
 
 class ChangePasswordNotAllowedException implements Exception {
@@ -88,34 +106,23 @@ class AuthManager {
   int? _tokenExpiryCache;
   bool _isAuthFailed = false;
 
-  final _secureStorage = const FlutterSecureStorage(
-    aOptions: AndroidOptions(
-      keyCipherAlgorithm: KeyCipherAlgorithm.RSA_ECB_OAEPwithSHA_256andMGF1Padding,
-      storageCipherAlgorithm: StorageCipherAlgorithm.AES_GCM_NoPadding,
-    ),
-    iOptions: IOSOptions(
-      accessibility: KeychainAccessibility.first_unlock_this_device,
-    ),
-  );
-
-  static const String _keyKratosSessionToken = 'keemos_kratos_session_token';
   String? _kratosSessionTokenCache;
   String? _recoveryFlowIdCache;
 
   Future<void> _saveKratosSessionToken(String token) async {
     _kratosSessionTokenCache = token;
-    await _secureStorage.write(key: _keyKratosSessionToken, value: token);
+    await storage.saveKratosSessionToken(token);
   }
 
   Future<String?> _getKratosSessionToken() async {
     if (_kratosSessionTokenCache != null) return _kratosSessionTokenCache;
-    _kratosSessionTokenCache = await _secureStorage.read(key: _keyKratosSessionToken);
+    _kratosSessionTokenCache = await storage.readKratosSessionToken();
     return _kratosSessionTokenCache;
   }
 
   Future<void> _clearKratosSessionToken() async {
     _kratosSessionTokenCache = null;
-    await _secureStorage.delete(key: _keyKratosSessionToken);
+    await storage.clearKratosSessionToken();
   }
 
   Future<String?> _getAccessToken() async {
@@ -158,9 +165,11 @@ class AuthManager {
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (RequestOptions options, handler) async {
-          final accessToken = await _getAccessToken();
-          if (accessToken != null && accessToken.isNotEmpty) {
-            options.headers['Authorization'] = 'Bearer $accessToken';
+          if (!options.headers.containsKey('Authorization')) {
+            final accessToken = await _getAccessToken();
+            if (accessToken != null && accessToken.isNotEmpty) {
+              options.headers['Authorization'] = 'Bearer $accessToken';
+            }
           }
           return handler.next(options);
         },
@@ -172,9 +181,10 @@ class AuthManager {
       InterceptorsWrapper(
         onError: (DioException error, handler) async {
           // Handle 401 Unauthorized errors by attempting token refresh
-          // Skip retry for refresh endpoint itself to prevent infinite loop
+          // Skip retry for refresh endpoints themselves to prevent infinite loop
           final isRefreshEndpoint =
-              error.requestOptions.path.contains('/auth/refresh');
+              error.requestOptions.path.contains('/auth/refresh') ||
+              error.requestOptions.path.contains('/auth/session/kratos');
           final alreadyRetried =
               error.requestOptions.extra['_refreshed_token'] == true;
 
@@ -919,7 +929,51 @@ class AuthManager {
       final refresh = _refreshTokenCache;
       dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh() called. Stored refresh token length: ${refresh?.length ?? 0}');
       if (refresh == null || refresh.isEmpty) {
-        dev.log('[SDK Auth #${identityHashCode(this)}] No refresh token available, skipping refresh.');
+        // Thử đổi Kratos Session Token nếu không có refresh token (tài khoản SSO)
+        final kratosToken = await _getKratosSessionToken();
+        if (kratosToken != null && kratosToken.isNotEmpty) {
+          dev.log('[SDK Auth #${identityHashCode(this)}] No refresh token, but Kratos Session Token found. Swapping Kratos session for new Keemos JWT...');
+          try {
+            final baseUri = Uri.parse(_dio.options.baseUrl);
+            final baseDomain = '${baseUri.scheme}://${baseUri.authority}';
+            final sessionResp = await _dio.get(
+              '$baseDomain/api/v1/auth/session/kratos',
+              options: Options(
+                headers: {
+                  'Cookie': 'ory_kratos_session=$kratosToken',
+                  'Authorization': 'Bearer $kratosToken',
+                  'X-Session-Token': kratosToken,
+                  'Accept': 'application/json',
+                },
+              ),
+            );
+
+            final statusCode = sessionResp.statusCode ?? 200;
+            dev.log('[SDK Auth #${identityHashCode(this)}] Kratos session exchange response status: $statusCode');
+            if (statusCode >= 400 && statusCode < 500) {
+              dev.log('[SDK Auth #${identityHashCode(this)}] Kratos session exchange failed (4xx). Clearing tokens...');
+              await _clearTokensSafely();
+              return _completeRefresh(completer, false);
+            }
+
+            final sessionBody = sessionResp.data as Map<String, dynamic>;
+            final authToken = _parseAuthToken(sessionBody);
+            await _persistAuthToken(authToken);
+            return _completeRefresh(completer, true);
+          } catch (e) {
+            dev.log('[SDK Auth #${identityHashCode(this)}] Exception during Kratos session exchange: $e');
+            if (e is DioException) {
+              final statusCode = e.response?.statusCode;
+              if (statusCode != null && statusCode >= 400 && statusCode < 500) {
+                dev.log('[SDK Auth #${identityHashCode(this)}] DioException with 4xx in Kratos session exchange. Clearing tokens...');
+                await _clearTokensSafely();
+              }
+            }
+            return _completeRefresh(completer, false);
+          }
+        }
+
+        dev.log('[SDK Auth #${identityHashCode(this)}] No refresh token or Kratos session token available, skipping refresh.');
         return _completeRefresh(completer, false);
       }
 
@@ -984,10 +1038,20 @@ class AuthManager {
   Future<void> _restoreAutoRefresh() async {
     final expiryMs = await _getTokenExpiry();
     final refresh = await _getRefreshToken();
-    if (refresh == null || refresh.isEmpty) {
+    final kratosToken = await _getKratosSessionToken();
+    
+    final accessToken = await _getAccessToken();
+    if (accessToken == null || accessToken.isEmpty) {
       _isAuthFailed = true;
     } else {
-      _isAuthFailed = false;
+      final isExpired = await _isTokenExpired();
+      if (isExpired && 
+          (refresh == null || refresh.isEmpty) && 
+          (kratosToken == null || kratosToken.isEmpty)) {
+        _isAuthFailed = true;
+      } else {
+        _isAuthFailed = false;
+      }
     }
     dev.log('[SDK Auth #${identityHashCode(this)}] _restoreAutoRefresh() called. Read expiryMs: $expiryMs, _isAuthFailed: $_isAuthFailed');
     _scheduleAutoRefresh(expiryMs);
@@ -1039,6 +1103,7 @@ class AuthManager {
     // Cập nhật cache đồng bộ trong RAM trước để đảm bảo các request tiếp theo
     // hoặc request retry có thể đọc được ngay lập tức, tránh write-to-read delay của OS Keyring.
     _accessTokenCache = authToken.accessToken;
+    dev.log('[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. (Token saved, length: ${authToken.accessToken.length})');
     if (authToken.refreshToken != null) {
       _refreshTokenCache = authToken.refreshToken!;
     }

@@ -23,27 +23,39 @@ class Household {
   final String householdId;
   final String name;
   final String? address;
+  final String? city;
   final HouseholdType? type;
+  final double? latitude;
+  final double? longitude;
 
   Household({
     required this.householdId,
     required this.name,
     this.address,
+    this.city,
     this.type,
+    this.latitude,
+    this.longitude,
   });
 
   factory Household.fromJson(Map<String, dynamic> json) => Household(
         householdId: json['household_id'] ?? json['householdId'] ?? json['id'] ?? '',
         name: json['name'] ?? '',
         address: json['address'],
+        city: json['city'],
         type: json['type'] == null ? null : HouseholdType.fromJson(json['type']),
+        latitude: (json['latitude'] as num?)?.toDouble(),
+        longitude: (json['longitude'] as num?)?.toDouble(),
       );
 
   Map<String, dynamic> toJson() => {
         'household_id': householdId,
         'name': name,
         if (address != null) 'address': address,
+        if (city != null) 'city': city,
         if (type != null) 'type': type!.wireValue,
+        if (latitude != null) 'latitude': latitude,
+        if (longitude != null) 'longitude': longitude,
       };
 }
 

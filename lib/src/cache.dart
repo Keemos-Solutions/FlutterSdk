@@ -128,13 +128,9 @@ class TieredCacheStore implements CacheStore {
   @override
   Future<CacheEntry?> read(String key) async {
     final mem = await memoryStore.read(key);
-    if (mem != null && !mem.isExpired) return mem;
+    if (mem != null) return mem;
     final disk = await persistentStore.read(key);
     if (disk == null) return null;
-    if (disk.isExpired) {
-      await persistentStore.delete(key);
-      return null;
-    }
     // hydrate memory for faster subsequent reads
     unawaited(memoryStore.write(key, disk));
     return disk;
@@ -239,10 +235,10 @@ class CacheManager {
     return CacheManager(store: TieredCacheStore(memoryStore: memoryStore, persistentStore: persistentStore));
   }
 
-  Future<CacheEntry?> read(String key) async {
+  Future<CacheEntry?> read(String key, {bool allowExpired = false}) async {
     final entry = await store.read(key);
     if (entry == null) return null;
-    if (entry.isExpired) {
+    if (entry.isExpired && !allowExpired) {
       await store.delete(key);
       return null;
     }

@@ -6,3 +6,5 @@ openapi.yaml
 .fvm/
 
 build
+.flutter-plugins-dependencies
+.vscode/

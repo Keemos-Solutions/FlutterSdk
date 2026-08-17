@@ -10,6 +10,7 @@ class SecureTokenStorage implements TokenStorage {
   static const String _keyAccessToken = 'keemos_access_token';
   static const String _keyRefreshToken = 'keemos_refresh_token';
   static const String _keyTokenExpiry = 'keemos_token_expiry';
+  static const String _keyKratosSessionToken = 'keemos_kratos_session_token';
 
   final FlutterSecureStorage _storage;
 
@@ -35,6 +36,7 @@ class SecureTokenStorage implements TokenStorage {
     await _storage.write(key: _keyRefreshToken, value: token);
   }
 
+  @override
   Future<void> saveTokenExpiry(int expiresIn) async {
     final expiryTime = DateTime.now().add(Duration(seconds: expiresIn)).millisecondsSinceEpoch;
     await _storage.write(key: _keyTokenExpiry, value: expiryTime.toString());
@@ -50,11 +52,13 @@ class SecureTokenStorage implements TokenStorage {
     return await _storage.read(key: _keyRefreshToken);
   }
 
+  @override
   Future<int?> readTokenExpiry() async {
     final value = await _storage.read(key: _keyTokenExpiry);
     return value != null ? int.parse(value) : null;
   }
 
+  @override
   Future<bool> isAccessTokenExpired() async {
     final expiry = await readTokenExpiry();
     if (expiry == null) return true;
@@ -63,11 +67,27 @@ class SecureTokenStorage implements TokenStorage {
   }
 
   @override
+  Future<void> saveKratosSessionToken(String token) async {
+    await _storage.write(key: _keyKratosSessionToken, value: token);
+  }
+
+  @override
+  Future<String?> readKratosSessionToken() async {
+    return await _storage.read(key: _keyKratosSessionToken);
+  }
+
+  @override
+  Future<void> clearKratosSessionToken() async {
+    await _storage.delete(key: _keyKratosSessionToken);
+  }
+
+  @override
   Future<void> clear() async {
     await Future.wait([
       _storage.delete(key: _keyAccessToken),
       _storage.delete(key: _keyRefreshToken),
       _storage.delete(key: _keyTokenExpiry),
+      _storage.delete(key: _keyKratosSessionToken),
     ]);
   }
 
@@ -81,6 +101,7 @@ class SecureTokenStorage implements TokenStorage {
     return {
       'access_token': await readAccessToken(),
       'refresh_token': await readRefreshToken(),
+      'kratos_session_token': await readKratosSessionToken(),
     };
   }
 }
