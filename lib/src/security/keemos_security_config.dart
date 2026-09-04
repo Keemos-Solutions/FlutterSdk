@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
+import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode, visibleForTesting;
 import 'security_violation_event.dart';
 
 class KeemosSecurityConfig {
@@ -12,8 +12,10 @@ class KeemosSecurityConfig {
     this.pinnedSpkiHashes = const [],
     this.blockProxies = true,
     this.onViolation,
+    @visibleForTesting bool? isRelease,
   }) : isEnforced = isEnforced ?? !kDebugMode {
-    if (kReleaseMode && !this.isEnforced) {
+    final effectiveIsRelease = isRelease ?? kReleaseMode;
+    if (effectiveIsRelease && !this.isEnforced) {
       throw UnsupportedError(
         'Security guardrails cannot be disabled in release builds.',
       );

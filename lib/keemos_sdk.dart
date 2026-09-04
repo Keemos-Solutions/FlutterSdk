@@ -22,3 +22,4 @@ export 'src/websocket/keemos_ws_url.dart';
 export 'src/websocket/keemos_device_websocket.dart';
 export 'src/security/security_violation_event.dart';
 export 'src/security/keemos_security_config.dart';
+export 'src/security/keemos_security_guard.dart';

@@ -10,6 +10,8 @@ import 'apis/notifications_api.dart';
 import 'apis/matter_api.dart';
 import 'apis/tuya_api.dart';
 import 'cache.dart';
+import 'security/keemos_security_config.dart';
+import 'security/keemos_security_guard.dart';
 
 class CachePolicyEntry {
   final String prefix;
@@ -24,6 +26,7 @@ class KeemosClient {
   final CacheManager? cacheManager;
   final List<CachePolicyEntry> cachePolicies;
   final CacheOptions defaultCacheOptions;
+  final KeemosSecurityConfig? securityConfig;
 
   KeemosClient({
     Dio? dio,
@@ -31,27 +34,31 @@ class KeemosClient {
     CacheManager? cacheManager,
     List<CachePolicyEntry>? cachePolicies,
     CacheOptions? defaultCacheOptions,
+    this.securityConfig,
   })  : dio = dio ?? Dio(),
         cacheManager = cacheManager ?? CacheManager(),
         cachePolicies = cachePolicies ?? _defaultCachePolicies,
         defaultCacheOptions = defaultCacheOptions ?? const CacheOptions(ttl: Duration(seconds: 45)) {
+    if (securityConfig != null) {
+      KeemosSecurityGuard.attach(this.dio, securityConfig!);
+    }
     this.dio.options.baseUrl = 'https://api.keemos.vn';
     this.dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) async {
       if (!options.headers.containsKey('Authorization')) {
-        final token = await authManager.getAccessToken();
+        final token = await authManager.getAccessToken(refreshIfExpired: true);
         if (token != null && token.isNotEmpty) {
           options.headers['Authorization'] = 'Bearer $token';
         }
       }
       return handler.next(options);
     }, onError: (error, handler) async {
-      // Handle 401 Unauthorized - try to refresh token
+      // Handle 401 Unauthorized - force refresh token
       if (error.response?.statusCode == 401 &&
           !error.requestOptions.path.contains('/auth/refresh') &&
           !error.requestOptions.path.contains('/auth/session/kratos')) {
-        final refreshed = await authManager.tryRefresh();
+        final refreshed = await authManager.tryRefresh(force: true);
         if (refreshed) {
-          final token = await authManager.getAccessToken();
+          final token = await authManager.getAccessToken(refreshIfExpired: false);
           if (token != null && token.isNotEmpty) {
             final opts = error.requestOptions;
             opts.headers['Authorization'] = 'Bearer $token';

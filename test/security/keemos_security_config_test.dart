@@ -64,5 +64,24 @@ void main() {
       ]));
       expect(SecurityViolationType.values.length, 4);
     });
+
+    test('throws UnsupportedError when isRelease is true and isEnforced is false', () {
+      expect(
+        () => KeemosSecurityConfig(isEnforced: false, isRelease: true),
+        throwsA(isA<UnsupportedError>()),
+      );
+    });
+
+    test('allows isEnforced is true when isRelease is true', () {
+      expect(
+        () => KeemosSecurityConfig(isEnforced: true, isRelease: true),
+        returnsNormally,
+      );
+    });
+
+    test('allows isEnforced is false when isRelease is false', () {
+      final config = KeemosSecurityConfig(isEnforced: false, isRelease: false);
+      expect(config.isEnforced, isFalse);
+    });
   });
 }
