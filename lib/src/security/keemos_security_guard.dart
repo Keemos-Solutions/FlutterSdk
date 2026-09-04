@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io' as io;
+import 'dart:typed_data';
 
+import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
@@ -30,15 +32,31 @@ class KeemosSecurityInterceptor extends Interceptor {
       if ((httpProxy != null && httpProxy.isNotEmpty) || (httpsProxy != null && httpsProxy.isNotEmpty)) {
         proxyFound = true;
       }
+      
+      if (!proxyFound) {
+        try {
+          final proxyString = io.HttpClient.findProxyFromEnvironment(options.uri);
+          if (proxyString.isNotEmpty && !proxyString.toUpperCase().contains('DIRECT')) {
+            proxyFound = true;
+          }
+        } catch (e) {
+          // ignore error to ensure it never fails on unsupported platforms
+        }
+      }
     }
 
     if (proxyFound) {
-      config.onViolation?.call(
-        SecurityViolationEvent(
-          type: SecurityViolationType.proxyDetected,
-          message: 'Active proxy detected on outbound request: ${options.uri}',
-        ),
-      );
+      try {
+        config.onViolation?.call(
+          SecurityViolationEvent(
+            type: SecurityViolationType.proxyDetected,
+            message: 'Active proxy detected on outbound request: ${options.uri}',
+          ),
+        );
+      } catch (e) {
+        // isolate onViolation call so it never breaks the interceptor execution flow entirely,
+        // although we throw immediately after anyway.
+      }
       throw DioException(
         requestOptions: options,
         type: DioExceptionType.connectionError,
@@ -60,8 +78,30 @@ class KeemosSecurityInterceptor extends Interceptor {
 
 /// Security guard for attaching SPKI public key pinning and proxy detection to Dio.
 class KeemosSecurityGuard {
-  /// Computes the SPKI / DER SHA-256 hash formatted as `sha256/<base64>`.
+  /// Computes the true SPKI SHA-256 hash formatted as `sha256/<base64>`.
   static String computeSpkiHash(List<int> derBytes) {
+    try {
+      final parser = ASN1Parser(Uint8List.fromList(derBytes));
+      final sequence = parser.nextObject() as ASN1Sequence;
+      final tbsCertificate = sequence.elements[0] as ASN1Sequence;
+      
+      for (var element in tbsCertificate.elements) {
+        if (element is ASN1Sequence && element.elements.length == 2) {
+          if (element.elements[0] is ASN1Sequence && element.elements[1] is ASN1BitString) {
+            final spkiBytes = element.encodedBytes;
+            final digest = sha256.convert(spkiBytes);
+            return 'sha256/${base64.encode(digest.bytes)}';
+          }
+        }
+      }
+    } catch (e) {
+      // Fallback below
+    }
+    return computeCertDerHash(derBytes);
+  }
+
+  /// Computes the certificate DER SHA-256 hash.
+  static String computeCertDerHash(List<int> derBytes) {
     final digest = sha256.convert(derBytes);
     return 'sha256/${base64.encode(digest.bytes)}';
   }
@@ -73,9 +113,12 @@ class KeemosSecurityGuard {
     KeemosSecurityConfig config,
   ) {
     if (cert == null) return false;
-    final hashBase64 = computeSpkiHash(cert.der);
+    final spkiHash = computeSpkiHash(cert.der);
+    final certDerHash = computeCertDerHash(cert.der);
 
-    final matches = config.pinnedSpkiHashes.contains(hashBase64);
+    final matches = config.pinnedSpkiHashes.contains(spkiHash) ||
+                    config.pinnedSpkiHashes.contains(certDerHash);
+                    
     if (!matches) {
       config.onViolation?.call(
         SecurityViolationEvent(
@@ -101,13 +144,6 @@ class KeemosSecurityGuard {
       if (adapter is IOHttpClientAdapter) {
         adapter.validateCertificate = (io.X509Certificate? cert, String host, int port) {
           return validateCertificate(cert, host, config);
-        };
-        adapter.createHttpClient = () {
-          final client = io.HttpClient();
-          client.badCertificateCallback = (io.X509Certificate cert, String host, int port) {
-            return validateCertificate(cert, host, config);
-          };
-          return client;
         };
       }
     }

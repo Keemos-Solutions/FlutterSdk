@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io' as io;
 import 'dart:typed_data';
 
+import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
@@ -180,6 +181,19 @@ void main() {
       test('computeSpkiHash calculates valid sha256 formatted pin', () {
         final hash = KeemosSecurityGuard.computeSpkiHash(sampleDerBytes);
         expect(hash, expectedHash);
+      });
+
+      test('computeSpkiHash extracts true SPKI from ASN.1 X.509 certificate', () {
+        final algId = ASN1Sequence()..add(ASN1ObjectIdentifier([1, 2, 840, 113549, 1, 1, 1]));
+        final bitString = ASN1BitString(Uint8List.fromList([0x00, 0x01, 0x02, 0x03]));
+        final spki = ASN1Sequence()..add(algId)..add(bitString);
+
+        final tbsCert = ASN1Sequence()..add(spki);
+        final cert = ASN1Sequence()..add(tbsCert)..add(algId)..add(bitString);
+
+        final expectedSpkiHash = 'sha256/${base64.encode(sha256.convert(spki.encodedBytes).bytes)}';
+        final computed = KeemosSecurityGuard.computeSpkiHash(cert.encodedBytes);
+        expect(computed, expectedSpkiHash);
       });
 
       test('validateCertificate approves certificate when hash matches pinned list', () {
