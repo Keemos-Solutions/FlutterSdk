@@ -1,4 +1,6 @@
+import 'package:dio/dio.dart';
 import '../client.dart';
+
 
 class AutomationsApi {
   final KeemosClient client;
@@ -59,4 +61,19 @@ class AutomationsApi {
     await client.delete('/api/v1/households/$householdId/automations/$automationId');
     await client.invalidateCacheByPrefix('/api/v1/households/$householdId/automations');
   }
+
+  /// Trigger an automation manually. Route: POST /api/v1/households/{householdId}/automations/{automationId}/trigger
+  Future<bool> triggerAutomation(String householdId, String automationId) async {
+    try {
+      final resp = await client.post(
+        '/api/v1/households/$householdId/automations/$automationId/trigger',
+        options: Options(validateStatus: (status) => true),
+      );
+      return resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 300;
+    } catch (_) {
+      return false;
+    }
+  }
 }
+
+

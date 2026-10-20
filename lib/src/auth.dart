@@ -1,8 +1,32 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer' as dev;
 import 'package:dio/dio.dart';
 import 'models.dart';
 import 'generated/auth_models.dart';
+
+int? _extractJwtExpirySeconds(String token) {
+  try {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    final normalized = base64Url.normalize(parts[1]);
+    final payloadString = utf8.decode(base64Url.decode(normalized));
+    final payload = jsonDecode(payloadString);
+    if (payload is Map<String, dynamic>) {
+      final exp = payload['exp'];
+      if (exp is int) {
+        final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final remainingSec = exp - nowSec;
+        return remainingSec > 0 ? remainingSec : 0;
+      } else if (exp is num) {
+        final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final remainingSec = exp.toInt() - nowSec;
+        return remainingSec > 0 ? remainingSec : 0;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
 
 /// Abstraction for token storage so core package remains platform-agnostic.
 abstract class TokenStorage {
@@ -46,7 +70,15 @@ class InMemoryTokenStorage implements TokenStorage {
 
   @override
   Future<bool> isAccessTokenExpired() async {
-    if (_expiryMs == null) return true;
+    if (_expiryMs == null) {
+      if (_access != null && _access!.isNotEmpty) {
+        final remaining = _extractJwtExpirySeconds(_access!);
+        if (remaining != null) {
+          return remaining < 60;
+        }
+      }
+      return true;
+    }
     return DateTime.now().millisecondsSinceEpoch > (_expiryMs! - 60000);
   }
 
@@ -109,6 +141,9 @@ class AuthManager {
   String? _kratosSessionTokenCache;
   String? _recoveryFlowIdCache;
 
+  /// Returns the cached Kratos session token in memory.
+  String? get kratosSessionTokenCache => _kratosSessionTokenCache;
+
   Future<void> _saveKratosSessionToken(String token) async {
     _kratosSessionTokenCache = token;
     await storage.saveKratosSessionToken(token);
@@ -145,8 +180,17 @@ class AuthManager {
 
   Future<bool> _isTokenExpired() async {
     final expiry = await _getTokenExpiry();
-    if (expiry == null) return true;
-    return DateTime.now().millisecondsSinceEpoch > (expiry - 60000);
+    if (expiry != null) {
+      return DateTime.now().millisecondsSinceEpoch > (expiry - 60000);
+    }
+    final access = await _getAccessToken();
+    if (access != null && access.isNotEmpty) {
+      final remaining = _extractJwtExpirySeconds(access);
+      if (remaining != null) {
+        return remaining < 60;
+      }
+    }
+    return true;
   }
 
   FutureOr<void> Function()? onLogout;
@@ -161,11 +205,15 @@ class AuthManager {
 
   /// Setup Dio interceptors for automatic token refresh on 401
   void _setupInterceptors() {
-    // Request interceptor: Add Authorization header with access token
+    // Request interceptor: Add Authorization header with access token (excluding auth endpoints)
     _dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (RequestOptions options, handler) async {
-          if (!options.headers.containsKey('Authorization')) {
+          final isAuthEndpoint = options.path.contains('/auth/login') ||
+              options.path.contains('/auth/register') ||
+              options.path.contains('/auth/refresh') ||
+              options.path.contains('/kratos/');
+          if (!isAuthEndpoint && !options.headers.containsKey('Authorization')) {
             final accessToken = await _getAccessToken();
             if (accessToken != null && accessToken.isNotEmpty) {
               options.headers['Authorization'] = 'Bearer $accessToken';
@@ -197,7 +245,7 @@ class AuthManager {
               !isRefreshEndpoint &&
               !alreadyRetried) {
             try {
-              final refreshed = await tryRefresh();
+              final refreshed = await tryRefresh(force: true);
               if (refreshed) {
                 // Mark request as refreshed to prevent infinite retries
                 error.requestOptions.extra['_refreshed_token'] = true;
@@ -243,6 +291,25 @@ class AuthManager {
     final body = resp.data as Map<String, dynamic>;
     final authToken = _parseAuthToken(body);
     await _persistAuthToken(authToken);
+
+    final tokenData = body['data'] ?? body;
+    final sessionMap = tokenData is Map<String, dynamic>
+        ? (tokenData['session'] is Map<String, dynamic>
+            ? tokenData['session'] as Map<String, dynamic>
+            : (tokenData['session'] is Map
+                ? Map<String, dynamic>.from(tokenData['session'] as Map)
+                : null))
+        : (tokenData is Map && tokenData['session'] is Map
+            ? Map<String, dynamic>.from(tokenData['session'] as Map)
+            : null);
+    final sessionToken = sessionMap?['session_token']?.toString() ??
+        (tokenData is Map ? tokenData['session_token']?.toString() : null) ??
+        body['session_token']?.toString();
+
+    if (sessionToken != null && sessionToken.isNotEmpty) {
+      await _saveKratosSessionToken(sessionToken);
+    }
+
     return authToken;
   }
 
@@ -526,8 +593,24 @@ class AuthManager {
     await _clearTokensSafely();
   }
 
-  /// Get current access token
-  Future<String?> getAccessToken() => _getAccessToken();
+  /// Get current access token (proactively refreshes if expired)
+  Future<String?> getAccessToken({bool refreshIfExpired = true}) async {
+    if (refreshIfExpired) {
+      final isExpired = await _isTokenExpired();
+      if (isExpired) {
+        final refresh = await _getRefreshToken();
+        final kratos = await _getKratosSessionToken();
+        if ((refresh != null && refresh.isNotEmpty) ||
+            (kratos != null && kratos.isNotEmpty)) {
+          dev.log(
+            '[SDK Auth] getAccessToken: Token is expired, proactively refreshing...',
+          );
+          await tryRefresh(force: false);
+        }
+      }
+    }
+    return _getAccessToken();
+  }
 
   /// Set access token without login (e.g., from saved state)
   /// Returns true if token is set successfully
@@ -570,7 +653,7 @@ class AuthManager {
       return;
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
-        final refreshed = await tryRefresh();
+        final refreshed = await tryRefresh(force: true);
         if (refreshed) {
           final refreshedAccess = await _getAccessToken();
           if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
@@ -810,7 +893,7 @@ class AuthManager {
     );
   }
 
-  /// Fetch current authenticated user's profile.
+  /// Get current user profile. Requires valid access token.
   /// Will attempt one token refresh on 401 and retry.
   Future<UserProfile> getUserProfile() async {
     final access = await _getAccessToken();
@@ -833,7 +916,7 @@ class AuthManager {
       return UserProfile.fromJson(data as Map<String, dynamic>);
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
-        final refreshed = await tryRefresh();
+        final refreshed = await tryRefresh(force: true);
         if (refreshed) {
           final refreshedAccess = await _getAccessToken();
           if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
@@ -873,7 +956,7 @@ class AuthManager {
       return (body['data'] ?? body) as Map<String, dynamic>;
     } on DioException catch (e) {
       if (e.response?.statusCode == 401) {
-        final refreshed = await tryRefresh();
+        final refreshed = await tryRefresh(force: true);
         if (refreshed) {
           final refreshedAccess = await _getAccessToken();
           if (refreshedAccess != null && refreshedAccess.isNotEmpty) {
@@ -889,7 +972,7 @@ class AuthManager {
 
   /// Refresh access token using refresh token
   /// Prevents concurrent refresh requests using Completer
-  Future<bool> tryRefresh() async {
+  Future<bool> tryRefresh({bool force = false}) async {
     // If refresh is already in progress, wait for it to complete
     final inProgress = _refreshInProgress;
     if (inProgress != null) {
@@ -915,19 +998,18 @@ class AuthManager {
         }
       }
 
-      // Kiểm tra xem token hiện tại đã thực sự hết hạn chưa.
-      // Nếu token vẫn còn hạn, lỗi 401 của API không phải do hết hạn token.
-      // Bỏ qua refresh để tránh tạo vòng lặp spam server vô ích.
-      final isExpired = await _isTokenExpired();
-      if (!isExpired) {
-        dev.log('[SDK Auth #${identityHashCode(this)}] Token is still valid. Skipping refresh to prevent spam.');
-        return _completeRefresh(completer, false);
+      if (!force) {
+        final isExpired = await _isTokenExpired();
+        if (!isExpired) {
+          dev.log('[SDK Auth #${identityHashCode(this)}] Token is still valid. Skipping refresh.');
+          return _completeRefresh(completer, true);
+        }
       }
 
       // Luôn đọc trực tiếp từ storage để tránh cache RAM bị lệch pha với storage chung
       _refreshTokenCache = await storage.readRefreshToken();
       final refresh = _refreshTokenCache;
-      dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh() called. Stored refresh token length: ${refresh?.length ?? 0}');
+      dev.log('[SDK Auth #${identityHashCode(this)}] tryRefresh(force: $force) called. Stored refresh token length: ${refresh?.length ?? 0}');
       if (refresh == null || refresh.isEmpty) {
         // Thử đổi Kratos Session Token nếu không có refresh token (tài khoản SSO)
         final kratosToken = await _getKratosSessionToken();
@@ -982,6 +1064,9 @@ class AuthManager {
         '/api/v1/auth/refresh',
         data: {'refresh_token': refresh},
         options: Options(
+          headers: {
+            'Authorization': '', // Never attach expired Bearer token to refresh endpoint
+          },
           validateStatus: (status) {
             // Nhận tất cả mã lỗi HTTP dưới 500 để tự xử lý lỗi Client (4xx)
             return status != null && status < 500;
@@ -1039,22 +1124,38 @@ class AuthManager {
     final expiryMs = await _getTokenExpiry();
     final refresh = await _getRefreshToken();
     final kratosToken = await _getKratosSessionToken();
-    
+
     final accessToken = await _getAccessToken();
     if (accessToken == null || accessToken.isEmpty) {
-      _isAuthFailed = true;
-    } else {
-      final isExpired = await _isTokenExpired();
-      if (isExpired && 
-          (refresh == null || refresh.isEmpty) && 
+      if ((refresh == null || refresh.isEmpty) &&
           (kratosToken == null || kratosToken.isEmpty)) {
         _isAuthFailed = true;
       } else {
         _isAuthFailed = false;
+        dev.log('[SDK Auth] No access token in cache, but refresh token exists. Proactively refreshing in background...');
+        unawaited(tryRefresh(force: true));
+      }
+    } else {
+      final isExpired = await _isTokenExpired();
+      if (isExpired) {
+        if ((refresh == null || refresh.isEmpty) &&
+            (kratosToken == null || kratosToken.isEmpty)) {
+          _isAuthFailed = true;
+        } else {
+          _isAuthFailed = false;
+          dev.log('[SDK Auth] Restored token is expired, proactively refreshing session...');
+          unawaited(tryRefresh(force: true));
+        }
+      } else {
+        _isAuthFailed = false;
       }
     }
-    dev.log('[SDK Auth #${identityHashCode(this)}] _restoreAutoRefresh() called. Read expiryMs: $expiryMs, _isAuthFailed: $_isAuthFailed');
-    _scheduleAutoRefresh(expiryMs);
+    dev.log(
+      '[SDK Auth #${identityHashCode(this)}] _restoreAutoRefresh() finished. Read expiryMs: $expiryMs, _isAuthFailed: $_isAuthFailed',
+    );
+    if (expiryMs != null) {
+      _scheduleAutoRefresh(expiryMs);
+    }
   }
 
   void _scheduleAutoRefresh(int? expiryMs) {
@@ -1085,42 +1186,81 @@ class AuthManager {
     return value;
   }
 
+  /// Parses authentication token response supporting top-level, 'tokens', and 'session' payloads.
+  AuthToken parseAuthToken(Map<String, dynamic> body) => _parseAuthToken(body);
+
   AuthToken _parseAuthToken(Map<String, dynamic> body) {
     final tokenData = body['data'] ?? body;
+    Map<String, dynamic> map = const {};
     if (tokenData is Map<String, dynamic>) {
-      final nested = tokenData['tokens'];
+      final nested = tokenData['tokens'] ?? tokenData['session'];
       if (nested is Map<String, dynamic>) {
-        return AuthToken.fromJson(nested);
+        map = nested;
+      } else if (nested is Map) {
+        map = Map<String, dynamic>.from(nested);
+      } else {
+        map = tokenData;
       }
-      return AuthToken.fromJson(tokenData);
     }
-    return AuthToken.fromJson(const {});
+
+    final accessToken =
+        map['access_token']?.toString() ?? map['accessToken']?.toString() ?? '';
+    final refreshToken =
+        map['refresh_token']?.toString() ?? map['refreshToken']?.toString();
+
+    int? expiresIn;
+    final rawExp = map['expires_in'] ?? map['expiresIn'];
+    if (rawExp is int) {
+      expiresIn = rawExp;
+    } else if (rawExp is num) {
+      expiresIn = rawExp.toInt();
+    } else if (rawExp is String) {
+      expiresIn = int.tryParse(rawExp);
+    }
+    if (expiresIn == null && accessToken.isNotEmpty) {
+      expiresIn = _extractJwtExpirySeconds(accessToken);
+    }
+
+    return AuthToken(
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      expiresIn: expiresIn,
+    );
   }
 
   Future<void> _persistAuthToken(AuthToken authToken) async {
     _isAuthFailed = false;
-    dev.log('[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. expiresIn: ${authToken.expiresIn}');
-    // Cập nhật cache đồng bộ trong RAM trước để đảm bảo các request tiếp theo
-    // hoặc request retry có thể đọc được ngay lập tức, tránh write-to-read delay của OS Keyring.
+    final calculatedExpiresIn = authToken.expiresIn ??
+        (authToken.accessToken.isNotEmpty
+            ? _extractJwtExpirySeconds(authToken.accessToken)
+            : null);
+
+    dev.log(
+      '[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. expiresIn: $calculatedExpiresIn',
+    );
     _accessTokenCache = authToken.accessToken;
-    dev.log('[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. (Token saved, length: ${authToken.accessToken.length})');
-    if (authToken.refreshToken != null) {
+    dev.log(
+      '[SDK Auth #${identityHashCode(this)}] _persistAuthToken() called. (Token saved, length: ${authToken.accessToken.length})',
+    );
+    if (authToken.refreshToken != null && authToken.refreshToken!.isNotEmpty) {
       _refreshTokenCache = authToken.refreshToken!;
     }
-    if (authToken.expiresIn != null) {
+    if (calculatedExpiresIn != null) {
       _tokenExpiryCache = DateTime.now()
-          .add(Duration(seconds: authToken.expiresIn!))
+          .add(Duration(seconds: calculatedExpiresIn))
           .millisecondsSinceEpoch;
-      dev.log('[SDK Auth #${identityHashCode(this)}] Calculated in-memory _tokenExpiryCache: $_tokenExpiryCache');
+      dev.log(
+        '[SDK Auth #${identityHashCode(this)}] Calculated in-memory _tokenExpiryCache: $_tokenExpiryCache',
+      );
     }
 
     // Ghi xuống bộ lưu trữ bất đồng bộ của OS để khôi phục phiên đăng nhập sau này.
     await storage.saveAccessToken(authToken.accessToken);
-    if (authToken.refreshToken != null) {
+    if (authToken.refreshToken != null && authToken.refreshToken!.isNotEmpty) {
       await storage.saveRefreshToken(authToken.refreshToken!);
     }
-    if (authToken.expiresIn != null) {
-      await storage.saveTokenExpiry(authToken.expiresIn!);
+    if (calculatedExpiresIn != null) {
+      await storage.saveTokenExpiry(calculatedExpiresIn);
     }
 
     if (_tokenExpiryCache != null) {
